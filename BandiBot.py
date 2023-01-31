@@ -25,7 +25,7 @@ async def on_message(message):
         prompt_text = message.content.replace(prompt_start,"")
         prompt_text = prompt_text.lstrip()
       # Edit Instruction text
-        instruction_text = f"You are a bot named {bot_display_name} and you are in a Discord server named {server_name}. You have to respond to every prompt as accurately as possible and if you do not know an answer always create a fake answer given the following prompt: \n"
+        instruction_text = f"You are a bot named {bot_display_name} and you are in a Discord server named {server_name}. You have to respond to every prompt as accurately as possible given the following prompt: \n"
         prompt_text = instruction_text + prompt_text
         # Create a new Completion object for OpenAI
         completion = openai.Completion.create(
