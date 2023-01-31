@@ -6,7 +6,7 @@ import openai
 client = discord.Client(intents=discord.Intents.default())
 
 # Set up the OpenAI client
-openai.api_key = os.getenv('OpenaAIAPIKey')
+openai.api_key = "YOUR OPENAI API KEY"
 
 # Define a message event handler
 @client.event
@@ -47,6 +47,6 @@ async def on_message(message):
 
 # Start the bot
 try:
-    client.run(os.getenv('TOKEN'))
+    client.run("YOUR DISCORD TOKEN")
 except:
     os.system("kill 1")
