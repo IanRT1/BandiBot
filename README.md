@@ -1,23 +1,42 @@
 # BandiBot
+This is a Discord bot that utilizes the OpenAI API to respond to prompts in a Discord server. The bot is written in Python and uses the discord library to interact with the Discord API and the openai library to interface with the OpenAI API.
 
-This is a simple Discord bot that uses the discord.py library and OpenAI API to respond to user prompts in a Discord server.
+## Prerequisites
+Before you can use this bot, you will need to create an API key for OpenAI. If you don't already have one, you can sign up for an API key on the OpenAI website.
 
-Requirements
+In addition, you will need to have a Discord account and create a bot user for your Discord server. You can follow the instructions on the Discord Developer Portal to set up a new bot user.
 
-discord.py library (version 1.5.1)
-openai library (version 0.7.0)
-OpenAI API Key
-To install the requirements, run:
-
+## Getting started
+Clone the repository to your local machine using the following command:
+bash
+Copy code
+git clone https://github.com/<YOUR_GITHUB_USERNAME>/Discord-OpenAI-Bot.git
+Navigate to the directory where the bot is stored and install the required libraries by running the following command:
+Copy code
 pip install -r requirements.txt
+Replace the placeholder text YOUR OPENAI API KEY in line 8 with your OpenAI API key.
 
-Running the Bot
+Replace the placeholder text YOUR DISCORD TOKEN in line 48 with your Discord bot user token.
 
-Create a new Discord client using discord.py library
-Set up the OpenAI client using the API Key
-Start the bot using the TOKEN environment variable
-Features
-The bot will respond to every prompt in a Discord server as accurately as possible, using OpenAI API to generate responses. If it doesn't know the answer, it will create a fake one. The bot ignores messages from itself and only responds to messages that mention the bot.
+Start the bot by running the following command:
 
-Contributing
-If you'd like to contribute to the project, please fork the repository and make your changes. Submit a pull request after testing your changes and I'll review and merge it.
+Copy code
+python bot.py
+How to use the bot
+To use the bot in a Discord server, simply mention the bot in a message, followed by the prompt you would like to receive a response to. The bot will respond to the prompt in the same channel.
+
+For example:
+
+kotlin
+Copy code
+@Discord-OpenAI-Bot What is the capital of France?
+Bot behavior
+The bot uses the OpenAI API to generate a response to the prompt. The temperature, maximum tokens, top-p, frequency penalty, and presence penalty parameters for the API request are set to 0.5, 1024, 1, 0, and 0, respectively.
+
+If the response from the OpenAI API contains an error, the bot will send the message An error occurred... to the Discord channel.
+
+## Contributing
+If you would like to contribute to this project, please fork the repository and create a pull request with your changes.
+
+## Support
+If you encounter any issues while using the bot, please create a new issue in the GitHub repository.
