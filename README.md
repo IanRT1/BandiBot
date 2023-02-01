@@ -7,30 +7,30 @@ Before you can use this bot, you will need to create an API key for OpenAI. If y
 In addition, you will need to have a Discord account and create a bot user for your Discord server. You can follow the instructions on the Discord Developer Portal to set up a new bot user.
 
 ## Getting started
-Clone the repository to your local machine using the following command:
-bash
-Copy code
-git clone https://github.com/<YOUR_GITHUB_USERNAME>/Discord-OpenAI-Bot.git
-Navigate to the directory where the bot is stored and install the required libraries by running the following command:
-Copy code
-pip install -r requirements.txt
-Replace the placeholder text YOUR OPENAI API KEY in line 8 with your OpenAI API key.
+1. Clone the repository to your local machine using the following command:
 
-Replace the placeholder text YOUR DISCORD TOKEN in line 48 with your Discord bot user token.
+```git clone https://github.com/IanRT1/BandiBot.git```
 
-Start the bot by running the following command:
+2. Navigate to the directory where the bot is stored and install the required libraries by running the following command:
 
-Copy code
-python bot.py
-How to use the bot
+```pip install -r requirements.txt```
+
+3. Replace the placeholder text YOUR OPENAI API KEY in line 8 with your OpenAI API key.
+
+4. Replace the placeholder text YOUR DISCORD TOKEN in line 48 with your Discord bot user token.
+
+5. Start the bot by running the following command:
+
+```python BandiBot.py```
+
+## How to use the bot
 To use the bot in a Discord server, simply mention the bot in a message, followed by the prompt you would like to receive a response to. The bot will respond to the prompt in the same channel.
 
 For example:
 
-kotlin
-Copy code
-@Discord-OpenAI-Bot What is the capital of France?
-Bot behavior
+> @BandiBot What is the capital of France?
+
+## Bot behavior
 The bot uses the OpenAI API to generate a response to the prompt. The temperature, maximum tokens, top-p, frequency penalty, and presence penalty parameters for the API request are set to 0.5, 1024, 1, 0, and 0, respectively.
 
 If the response from the OpenAI API contains an error, the bot will send the message An error occurred... to the Discord channel.
