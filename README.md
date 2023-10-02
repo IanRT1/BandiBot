@@ -1,5 +1,5 @@
 
-# BandiBot - The Intelligent Discord Companion
+# BandiBot - The Intelligent Discord ChatBot
 
 Elevate your Discord server experience with BandiBot, a revolutionary bot powered by OpenAI's GPT-3.5 Turbo. Designed with adaptability in mind, BandiBot brings intelligent conversations, personalized interactions, and server insights to your fingertips.
 
@@ -71,7 +71,6 @@ Tweak the values in `config.json` to make BandiBot as friendly, professional, qu
 ## 🔒 Best Security Practices
 
 - **API Key Management**: Always use environment variables or secret management tools for storing API keys and tokens.
-- **Minimal Permissions**: Grant BandiBot only the necessary permissions. Limit administrative privileges.
 
 ## 📊 Logging & Monitoring
 
@@ -91,7 +90,6 @@ BandiBot is licensed under the MIT License. Dive into the `LICENSE` file for det
 
 ## 🌟 Credits & Acknowledgements
 
-- **Ian Ramirez**: For the foundational architecture and conceptualization.
 - **OpenAI**: For the cutting-edge GPT-3.5 Turbo model and unmatched API support.
 - **Discord**: For the platform, API, and the vibrant community that drives projects like BandiBot.
 
