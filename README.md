@@ -47,8 +47,8 @@ Tweak the values in `config.json` to make BandiBot as friendly, professional, qu
 
 1. Clone the project repository:
    ```bash
-   git clone <repository-url>
-   cd <repository-name>
+   git clone https://github.com/IanRT1/BandiBot
+   cd BandiBot
    ```
 2. Install project dependencies:
    ```bash
