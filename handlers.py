@@ -1,208 +1,274 @@
-import discord
-import re
-from textwrap import dedent
-import pytz
-import logging
+import asyncio
 import json
+import logging
+import os
+import re
+import time
+from textwrap import dedent
+from zoneinfo import ZoneInfo
+
+import discord
+
 from utils import (
     clean_username,
     get_current_pst_time,
     get_current_pst_date,
     get_server_info,
 )
-from openai_utils import send_to_openai
+from openai_utils import categorize_message, send_to_openai
 
-# Function to build context information for conversation
-def build_context_info(message, categories, client):
-    # Extract relevant information from the message and server
+logger = logging.getLogger(__name__)
+
+# Load config once at import time, not on every message
+with open("config.json", "r", encoding="utf-8") as _f:
+    _CONFIG = json.load(_f)
+
+# Load static server lore (optional). Sent to the LLM on every message,
+# so keep the file lean — extra tokens cost money. Reloaded only on restart.
+_SERVER_LORE = ""
+if os.path.exists("server_info.md"):
+    with open("server_info.md", "r", encoding="utf-8") as _f:
+        _SERVER_LORE = _f.read().strip()
+    logger.info(f"Loaded server_info.md ({len(_SERVER_LORE)} chars)")
+
+_PACIFIC = ZoneInfo("America/Los_Angeles")
+
+
+def _strip_bot_mentions(message, client):
+    """
+    Remove bot mentions from message content cleanly.
+
+    Replaces the original `content.split()[0]` + `replace(...)` approach,
+    which broke when the mention wasn't the first token or appeared
+    multiple times in the message.
+    """
+    content = message.content
+    for mention_str in (client.user.mention, f"<@!{client.user.id}>"):
+        content = content.replace(mention_str, "")
+    return content.strip()
+
+
+def build_context_info(message, categories, client, server_info):
+    """Build context block for the system prompt. server_info is passed in
+    so we don't recompute it for the member-activity branch."""
     user_nick_or_name = clean_username(message.author.nick, message.author.name)
     server_name = message.guild.name
     channel_name = message.channel.name
     bot_display_name = client.user.display_name
-    prompt_start = message.content.split()[0]
-    user_message = f"{user_nick_or_name}: {message.content.replace(prompt_start, '').lstrip()}"
+    user_message = _strip_bot_mentions(message, client)
     creation_date = message.guild.created_at.strftime("%Y-%m-%d")
     server_owner = clean_username(message.guild.owner.nick, message.guild.owner.name)
     total_members = message.guild.member_count
     current_pst_time = get_current_pst_time()
     current_pst_date = get_current_pst_date()
-    server_info = get_server_info(message.guild)
     online_members_count = server_info["online_count"]
+    online_users_list = ", ".join(info[0] for info in server_info["online_members"])
 
-    # List of online members' nicknames/usernames
-    online_users_list = ", ".join([info[0] for info in server_info["online_members"]])
-
-    # Construct context information
     context = dedent(
         f"""
-    **Server Information**:
-    - Server Name: {server_name}
-    - Active Channel: {channel_name}
-    - Bot Name: {bot_display_name}
-    - Server Creation Date: {creation_date}
-    - Server Owner: {server_owner}
-    - Total Members: {total_members}
-    - Online Members: {online_members_count}
-    - Online Users: {online_users_list}
-    - Current Date: {current_pst_date}
-    - Server Time: {current_pst_time}
-    """
+        **Server Information**:
+        - Server Name: {server_name}
+        - Active Channel: {channel_name}
+        - Bot Name: {bot_display_name}
+        - Server Creation Date: {creation_date}
+        - Server Owner: {server_owner}
+        - Total Members: {total_members}
+        - Online Members: {online_members_count}
+        - Online Users: {online_users_list}
+        - Current Date: {current_pst_date}
+        - Server Time: {current_pst_time}
+        - Current User: {user_nick_or_name}
+        """
     ).strip()
 
-    # Add member activity context if applicable
     if "Member Activity" in categories:
-        context += build_member_activity_context(message)
+        context += "\n" + build_member_activity_context(server_info)
 
     return context, user_message
 
 
-# Function to build context information about member activities
-def build_member_activity_context(message):
-    # Get server information
-    server_info = get_server_info(message.guild)
+def build_member_activity_context(server_info):
+    """Build the member-activity context block. Takes pre-computed server_info
+    instead of recomputing it (was being called twice per message)."""
+    online_table = "\n".join(
+        f"{m[0]} - Roles: {', '.join(m[1])} - Joined {m[2]} days ago - Permissions: {' '.join(m[3])}"
+        for m in server_info["online_members"]
+    ) or "No one"
 
-    # Create a table of online members
-    online_table = (
-        "\n".join(
-            [
-                f"{m[0]} - Roles: {', '.join(m[1])} - Joined {m[2]} days ago - Permissions: {' '.join(m[3])}"
-                for m in server_info["online_members"]
-            ]
-        )
-        or "No one"
-    )
+    playing_info = ", ".join(
+        f"{m[0]} is playing {m[1]}" for m in server_info["members_playing"]
+    ) or "No one is playing any games"
 
-    # Create a list of members playing games
-    playing_info = (
-        ", ".join([f"{m[0]} is playing {m[1]}" for m in server_info["members_playing"]])
-        or "No one is playing any games"
-    )
-
-    # Create a list of members in voice chat channels
-    voice_chat_info_list = []
-    for vc_name, members in server_info["voice_channels_info"].items():
-        formatted_vc_members = ", ".join(members)
-        voice_chat_info_list.append(f"In '{vc_name}': {formatted_vc_members}")
+    voice_chat_info_list = [
+        f"In '{vc_name}': {', '.join(members)}"
+        for vc_name, members in server_info["voice_channels_info"].items()
+    ]
     voice_chat_info = "; ".join(voice_chat_info_list) or "No one is in voice chat"
 
-    # Construct member activity context
-    context_info = f"""
-    **Member Activities**:
-    - Online Members:
-    {online_table}
-    - Current Activities: {playing_info}
-    - Members in Voice Chat: {voice_chat_info}
-    """
+    return dedent(
+        f"""
+        **Member Activities**:
+        - Online Members:
+        {online_table}
+        - Current Activities: {playing_info}
+        - Members in Voice Chat: {voice_chat_info}
+        """
+    ).strip()
 
-    return context_info
 
-
-# Function to build special instructions for the bot
 def build_instruction(categories, bot_display_name, server_name):
+    """Build the system instruction from config.json (loaded once at module level).
 
-    # Load the config.json data
-    with open("config.json", "r") as file:
-        config_data = json.load(file)
+    The `initial` instruction in config.json supports {bot_display_name} and
+    {server_name} placeholders, which are filled in here. Static server lore
+    from server_info.md is appended if present.
+    """
+    instruction = _CONFIG["instructions"]["initial"].format(
+        bot_display_name=bot_display_name,
+        server_name=server_name,
+    )
 
-    instruction = config_data["instructions"]["initial"]
-    special_instructions = config_data["special_instructions"]
+    if _SERVER_LORE:
+        instruction += f"\n\n# Server-specific knowledge:\n{_SERVER_LORE}"
 
-    # Add special instructions for categories if applicable
+    special_instructions = _CONFIG["special_instructions"]
     for category in categories:
         if category in special_instructions:
-            instruction += f"\nThere are your special instructions for this message: {special_instructions[category]}"
-
+            instruction += (
+                f"\nThere are your special instructions for this message: "
+                f"{special_instructions[category]}"
+            )
     return instruction
 
 
-# Asynchronous function to handle bot mentions
-async def handle_bot_mention(message, categories, client):
-    # Get the bot's display name
-    bot_display_name = client.user.display_name
+async def handle_bot_mention(message, client):
+    """Handle a message that mentions the bot, with structured timing logs.
 
-    # Fetch recent messages from the channel
-    recent_messages_str = await fetch_recent_messages(message.channel, limit=20)
+    Runs categorization, history fetch, and server-info gathering all in
+    parallel since none of them depend on each other's results.
+    """
+    user_name = clean_username(message.author.nick, message.author.name)
+    msg_len = len(message.content)
+    t_start = time.perf_counter()
 
-    # Build the context and instruction once
-    context_info, user_message = build_context_info(message, categories, client)
-    instruction = build_instruction(categories, bot_display_name, message.guild.name)
+    logger.info(f"→ {user_name} ({msg_len} chars): {message.content[:80]!r}")
 
-    # Create the payload for OpenAI
+    t_prep = time.perf_counter()
+    categories, history_messages, server_info = await asyncio.gather(
+        categorize_message(message.content),
+        fetch_recent_messages(message.channel, client, limit=20),
+        asyncio.to_thread(get_server_info, message.guild),
+    )
+    prep_ms = (time.perf_counter() - t_prep) * 1000
+
+    logger.info(f"  categorized as {categories or ['(none)']} | prep took {prep_ms:.0f}ms")
+
+    context_info, user_message = build_context_info(message, categories, client, server_info)
+    instruction = build_instruction(
+        categories,
+        client.user.display_name,
+        message.guild.name,
+    )
+
+    # Build the full message list. History is spliced in as actual role-tagged
+    # turns (user/assistant) instead of being stuffed into a system block as a
+    # transcript — this stops the model from mimicking transcript formatting
+    # in its replies.
     conversation_payload = {
-        "model": "gpt-3.5-turbo",
         "messages": [
             {"role": "system", "content": instruction},
             {"role": "system", "content": context_info},
-            {"role": "system", "content": recent_messages_str},
-            {"role": "user", "content": user_message},
+            *history_messages,
+            {"role": "user", "content": f"[{user_name}] {user_message}"},
         ],
         "temperature": 0.5,
     }
 
-    # Send the payload to OpenAI and process the response
+    t_llm = time.perf_counter()
     response_data = await send_to_openai(conversation_payload)
+    llm_ms = (time.perf_counter() - t_llm) * 1000
+
     if not response_data:
-        await message.channel.send(
-            f"{message.author.mention} Sorry, I encountered an issue processing your request. Please try again later."
-        )
+        logger.error(f"  LLM call failed after {llm_ms:.0f}ms")
+        try:
+            await message.reply(
+                "Sorry, I encountered an issue processing your request. Please try again later.",
+                mention_author=False,
+            )
+        except Exception as e:
+            logger.error(f"Failed to send error reply: {e}")
         return
 
     response_text = process_openai_response(data=response_data, message=message, client=client)
-
-    # Send the response to the channel
     await send_response_to_channel(message, response_text)
 
+    total_ms = (time.perf_counter() - t_start) * 1000
+    logger.info(
+        f"← replied to {user_name} ({len(response_text)} chars) | "
+        f"llm {llm_ms:.0f}ms | total {total_ms:.0f}ms"
+    )
 
-# Asynchronous function to fetch recent messages from a channel
-async def fetch_recent_messages(channel, limit=20):
-    # Fetch the most recent messages from the channel
+
+async def fetch_recent_messages(channel, client, limit=20):
+    """Fetch recent messages and return them as a list of role-tagged
+    OpenAI message dicts (chronological order).
+
+    Past bot messages → role 'assistant' (clean content, no name prefix).
+    Past user messages → role 'user' with '[Name] content' format so the
+    model knows who said what without seeing transcript-style 'Name:' lines.
+    """
     messages = [msg async for msg in channel.history(limit=limit)]
-    # Reverse the messages so they are in chronological order
     messages.reverse()
 
-    # Format the messages
-    formatted_messages = []
-    for msg in messages:
-        # Check if the author is a member of the guild
-        if isinstance(msg.author, discord.Member):
-            cleaned_name = clean_username(msg.author.nick, msg.author.name)
-        else:
-            cleaned_name = msg.author.name
+    bot_id = client.user.id
 
-        # Get the timestamp of the message in PST and format it
-        pacific = pytz.timezone("US/Pacific")
-        timestamp = msg.created_at.astimezone(pacific).strftime("%I:%M %p")
+    # Build a member lookup once for cleaning up @mentions inside message content
+    member_mention_map = {
+        member.mention: clean_username(member.nick, member.name)
+        for member in channel.guild.members
+    }
+
+    history = []
+    for msg in messages:
+        # Skip empty messages (e.g. embeds-only)
+        if not msg.content:
+            continue
 
         content = msg.content
-        for member in channel.guild.members:
-            member_name = clean_username(member.nick, member.name)
-            content = content.replace(member.mention, member_name)
+        for mention_str, replacement in member_mention_map.items():
+            content = content.replace(mention_str, replacement)
 
-        formatted_messages.append(f"[{timestamp}] {cleaned_name}: {content}")
+        if msg.author.id == bot_id:
+            # Bot's past messages — clean assistant turns, no name prefix
+            history.append({"role": "assistant", "content": content})
+        else:
+            # User messages — tag with the speaker's name in brackets
+            if isinstance(msg.author, discord.Member):
+                speaker = clean_username(msg.author.nick, msg.author.name)
+            else:
+                speaker = msg.author.name
+            history.append({"role": "user", "content": f"[{speaker}] {content}"})
 
-    return "\n".join(formatted_messages)
+    return history
 
 
-# Function to process OpenAI's response
 def process_openai_response(data, message, client):
+    """Extract and clean the assistant's response text from the API payload."""
     if "choices" not in data:
-        logging.error(f"Unexpected OpenAI API response: {data}")
+        logger.error(f"Unexpected OpenAI API response: {data}")
         return "Sorry, I encountered an issue processing your request."
 
     response_text = data["choices"][0]["message"]["content"].strip()
-
     bot_display_name = client.user.display_name
     user_name = clean_username(message.author.nick, message.author.name)
 
-    # Patterns to look for: bot's name followed by a colon,
-    # timestamp followed by bot's name and a colon,
-    # and the nickname or username of the prompter followed by a quote.
+    # Patterns the model sometimes leaks from the system prompt format
     patterns_to_strip = [
         re.compile(r"^" + re.escape(bot_display_name) + r":"),
         re.compile(r"^\[\d{1,2}:\d{2} (AM|PM)\] " + re.escape(bot_display_name) + r":"),
-        re.compile(r"^" + re.escape(user_name) + r"[:,]"),
+        re.compile(r"^" + re.escape(user_name) + r"[:,\s]"),
+        re.compile(r"^\[" + re.escape(user_name) + r"\]\s*"),
     ]
-
     for pattern in patterns_to_strip:
         if pattern.match(response_text):
             response_text = pattern.sub("", response_text).strip()
@@ -210,12 +276,17 @@ def process_openai_response(data, message, client):
     return response_text
 
 
-# Asynchronous function to send the response to the channel
 async def send_response_to_channel(message, response_text):
+    """Send the bot's response as a native Discord reply to the user's message."""
     try:
-        await message.channel.send(f"{message.author.mention} {response_text}")
+        await message.reply(response_text, mention_author=False)
     except Exception as e:
-        logging.error(f"Error sending message: {e}")
-        await message.channel.send(
-            f"{message.author.mention} An error occurred. Please try again..."
-        )
+        logger.error(f"Error sending message: {e}")
+        try:
+            await message.reply(
+                "An error occurred. Please try again...",
+                mention_author=False,
+            )
+        except Exception as e2:
+            # If even the fallback fails, log and give up — don't crash the handler
+            logger.error(f"Fallback send also failed: {e2}")

@@ -1,77 +1,112 @@
-import aiohttp
-import logging
+"""Thin async wrapper around the OpenAI SDK for chat completions and categorization."""
+
 import json
-from config import OPENAI_API_KEY
+import logging
+import os
 
-# Load the config.json data
-with open("config.json", "r") as file:
-    config_data = json.load(file)
+from openai import AsyncOpenAI, APIError, APIConnectionError, RateLimitError
+
+logger = logging.getLogger(__name__)
+
+# Load category definitions once at module import (was already doing this)
+with open("config.json", "r", encoding="utf-8") as _f:
+    _CONFIG = json.load(_f)
+
+CATEGORY_LIST = _CONFIG["categories"]
+
+# Single shared async client. Reads OPENAI_API_KEY from env automatically
+# (loaded by main.py via dotenv). Manages its own connection pool — don't
+# create one per request like the old aiohttp code did.
+_client = AsyncOpenAI()
+
+# Models — overridable via .env. Categorization gets a cheaper model since
+# it's a simple classification task.
+DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4")
+CATEGORIZER_MODEL = os.getenv("OPENAI_CATEGORIZER_MODEL", "gpt-5.4-mini")
 
 
-CATEGORY_LIST = config_data["categories"]
-
-# Asynchronous function to categorize a message
 async def categorize_message(message):
-    # Create category instructions for the user
-    category_instructions = "\n".join([f"{k}: {v}" for k, v in CATEGORY_LIST.items()])
+    """Classify a message into one or more configured categories.
 
-    # Construct a payload for OpenAI to categorize the message
-    payload = {
-        "model": "gpt-3.5-turbo",
-        "messages": [
-            {
-                "role": "system",
-                "content": f"Your whole purpose is to categorize prompt intents. Use only the following categories for labeling: \n{category_instructions}\n Identify the best category for the given message and output only using the category names from the list that apply.",
-            },
-            {"role": "user", "content": f'Discord Message: "{message}"'},
-        ],
-    }
+    Returns a list of category names from CATEGORY_LIST that the model
+    judged applicable. Returns an empty list on any failure.
+    """
+    category_instructions = "\n".join(f"{k}: {v}" for k, v in CATEGORY_LIST.items())
 
-    headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "Content-Type": "application/json",
-    }
-
-    # Send the request to OpenAI to categorize the message
-    async with aiohttp.ClientSession() as session:
-        async with session.post(
-            "https://api.openai.com/v1/chat/completions", headers=headers, json=payload
-        ) as response:
-            response_data = await response.json()
-
-            # Check if 'choices' exists in the response data
-            if "choices" in response_data:
-                # Extract the output text and filter it to get the categories
-                output_text = response_data["choices"][0]["message"]["content"].strip()
-                output_categories = [cat for cat in CATEGORY_LIST if cat in output_text]
-                return output_categories
-            else:
-                # Handle error case
-                print(f"API Error: {response_data.get('error', 'Unknown error')}")
-                return []
-
-
-# Asynchronous function to send a payload to OpenAI
-async def send_to_openai(payload):
-    headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "Content-Type": "application/json",
-    }
-
-    OPENAI_ENDPOINT = "https://api.openai.com/v1/chat/completions"
+    system_prompt = (
+        "Your whole purpose is to categorize prompt intents. Use only the "
+        f"following categories for labeling: \n{category_instructions}\n "
+        "Identify the best category for the given message and output only "
+        "using the category names from the list that apply."
+    )
 
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                OPENAI_ENDPOINT, headers=headers, json=payload
-            ) as response:
-                if response.status == 200:
-                    return await response.json()
-                else:
-                    logging.error(
-                        f"Error from OpenAI API: {response.status} - {await response.text()}"
-                    )
-                    return None
+        response = await _client.chat.completions.create(
+            model=CATEGORIZER_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f'Discord Message: "{message}"'},
+            ],
+        )
+        output_text = response.choices[0].message.content.strip()
+        # Same filtering approach as before: keep only category names that
+        # actually appear in the model's output.
+        return [cat for cat in CATEGORY_LIST if cat in output_text]
+
+    except (APIError, APIConnectionError, RateLimitError) as e:
+        logger.error(f"OpenAI categorization failed: {e}")
+        return []
     except Exception as e:
-        logging.error(f"Exception during OpenAI API call: {e}")
+        logger.error(f"Unexpected error during categorization: {e}")
+        return []
+
+
+async def send_to_openai(payload):
+    """Send a chat completion request and return a dict-shaped response.
+
+    Accepts the same payload shape handlers.py already builds:
+        {"model": "...", "messages": [...], "temperature": 0.5}
+
+    Returns a dict matching the legacy HTTP response shape so handlers.py's
+    `data["choices"][0]["message"]["content"]` parsing keeps working:
+        {"choices": [{"message": {"content": "..."}}]}
+
+    Returns None on failure.
+    """
+    try:
+        # Default model if handlers.py didn't specify one (it does, but be safe)
+        model = payload.get("model", DEFAULT_MODEL)
+        messages = payload["messages"]
+        temperature = payload.get("temperature", 0.5)
+
+        response = await _client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+        )
+
+        # Normalize Pydantic response back to the dict shape handlers.py expects.
+        # If you later rewrite process_openai_response to take the SDK object
+        # directly, you can drop this normalization.
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": response.choices[0].message.content,
+                    }
+                }
+            ]
+        }
+
+    except RateLimitError as e:
+        logger.error(f"OpenAI rate limit hit: {e}")
+        return None
+    except APIConnectionError as e:
+        logger.error(f"OpenAI connection error: {e}")
+        return None
+    except APIError as e:
+        logger.error(f"OpenAI API error: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error calling OpenAI: {e}")
         return None
