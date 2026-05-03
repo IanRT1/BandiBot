@@ -9,7 +9,7 @@ A lo largo de los años, el servidor ha sobrevivido varios eventos que marcaron 
 ## Eventos Históricos
 
 ### La Batalla de Bandía
-Uno de los enfrentamientos más recordados del servidor. Participaron **Pollo**, **DJ Bonk**, **Trabis**, **Ian** y **Tronky**, con participación mínima de algunos miembros del grupo de los **OGs**. Los detalles del enfrentamiento se han vuelto parte del folclore del servidor y rara vez se discuten abiertamente.
+Uno de los enfrentamientos más recordados del servidor. Participaron **Poyo**, **DJ Bonk**, **Trabis**, **Ian** y **Tronky**, con participación mínima de algunos miembros del grupo de los **OGs**. Los detalles del enfrentamiento se han vuelto parte del folclore del servidor y rara vez se discuten abiertamente.
 
 ### La Guerra Civil de los OGs
 Un conflicto interno entre los miembros fundadores y veteranos del servidor, conocidos como **los OGs**. Es uno de los capítulos más complejos en la historia del servidor. Lo que ocurrió exactamente queda entre los involucrados, y mencionarlo frente a un OG puede revivir viejas tensiones.

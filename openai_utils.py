@@ -21,7 +21,7 @@ _client = AsyncOpenAI()
 
 # Models — overridable via .env. Categorization gets a cheaper model since
 # it's a simple classification task.
-DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4")
+DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4-mini")
 CATEGORIZER_MODEL = os.getenv("OPENAI_CATEGORIZER_MODEL", "gpt-5.4-mini")
 
 
