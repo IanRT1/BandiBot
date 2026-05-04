@@ -39,12 +39,14 @@ if _source_cookies:
     _COOKIES_PATH = "/tmp/youtube_cookies.txt"
     try:
         shutil.copy(_source_cookies, _COOKIES_PATH)
-        logger.info(f"[music] copied cookies {_source_cookies} → {_COOKIES_PATH}")
+        print(f"[music] copied cookies {_source_cookies} → {_COOKIES_PATH}", flush=True)
     except Exception as e:
-        logger.error(f"[music] failed to copy cookies: {e}")
+        print(f"[music] failed to copy cookies: {e}", flush=True)
         _COOKIES_PATH = None
 else:
-    logger.warning("[music] no youtube_cookies.txt found — yt-dlp will run unauthenticated")
+    print("[music] no youtube_cookies.txt found — yt-dlp will run unauthenticated", flush=True)
+    print(f"[music] checked paths: {_COOKIES_CANDIDATES}", flush=True)
+    print(f"[music] cwd at import: {os.getcwd()}", flush=True)
 
 # yt-dlp config — extract audio stream URL only, no download to disk
 _YDL_OPTS = {
