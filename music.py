@@ -10,8 +10,6 @@ to the LLM as tool results, which the LLM then uses to compose its chat reply.
 
 import asyncio
 import logging
-import os
-import shutil
 from collections import deque
 from dataclasses import dataclass
 from typing import Optional
@@ -20,33 +18,6 @@ import discord
 import yt_dlp
 
 logger = logging.getLogger(__name__)
-
-# YouTube cookies file. On Render, secret files live at /etc/secrets/<name>
-# but that mount is read-only — yt-dlp wants to write session updates back
-# to the file, so copy it to /tmp/ at startup. Updates are lost on container
-# restart, which doesn't matter for us.
-_COOKIES_CANDIDATES = (
-    "/etc/secrets/youtube_cookies.txt",
-    "youtube_cookies.txt",
-)
-_source_cookies = next(
-    (p for p in _COOKIES_CANDIDATES if os.path.exists(p)),
-    None,
-)
-
-_COOKIES_PATH = None
-if _source_cookies:
-    _COOKIES_PATH = "/tmp/youtube_cookies.txt"
-    try:
-        shutil.copy(_source_cookies, _COOKIES_PATH)
-        print(f"[music] copied cookies {_source_cookies} → {_COOKIES_PATH}", flush=True)
-    except Exception as e:
-        print(f"[music] failed to copy cookies: {e}", flush=True)
-        _COOKIES_PATH = None
-else:
-    print("[music] no youtube_cookies.txt found — yt-dlp will run unauthenticated", flush=True)
-    print(f"[music] checked paths: {_COOKIES_CANDIDATES}", flush=True)
-    print(f"[music] cwd at import: {os.getcwd()}", flush=True)
 
 # yt-dlp config — extract audio stream URL only, no download to disk
 _YDL_OPTS = {
@@ -57,8 +28,6 @@ _YDL_OPTS = {
     "default_search": "ytsearch",
     "source_address": "0.0.0.0",
 }
-if _COOKIES_PATH:
-    _YDL_OPTS["cookiefile"] = _COOKIES_PATH
 
 # FFmpeg options — reconnect on transient network blips, no video
 _FFMPEG_BEFORE = (
