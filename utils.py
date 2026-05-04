@@ -9,6 +9,14 @@ _PACIFIC = ZoneInfo("America/Los_Angeles")
 # Permissions we surface to the model when describing members
 IMPORTANT_PERMISSIONS = ("ban_members", "manage_channels", "manage_roles")
 
+# Voice channel IDs whose members must NEVER be exposed to the LLM.
+# The bot still sees these channels via Discord's API, but they're filtered
+# out of get_server_info() before any data is sent to OpenAI.
+HIDDEN_VOICE_CHANNEL_IDS = {
+    1373799593128624158,
+    1484415471913795584,
+}
+
 
 def clean_username(nick, name):
     """Return nick (with decorative chars stripped) if present, else name."""
@@ -62,7 +70,12 @@ def _get_important_perms(member):
 
 
 def get_server_info(guild):
-    """Collect member presence, activity, and voice-channel info for the guild."""
+    """Collect member presence, activity, and voice-channel info for the guild.
+
+    Voice channels listed in HIDDEN_VOICE_CHANNEL_IDS are excluded entirely —
+    neither their names nor their members are returned. The LLM never sees
+    that they exist.
+    """
     online_members = []
     members_playing = []
 
@@ -87,6 +100,8 @@ def get_server_info(guild):
 
     voice_channels_info = {}
     for vc in guild.voice_channels:
+        if vc.id in HIDDEN_VOICE_CHANNEL_IDS:
+            continue
         members_in_vc = [
             clean_username(m.nick, m.name) for m in vc.members if not m.bot
         ]
