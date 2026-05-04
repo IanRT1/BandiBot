@@ -1,7 +1,8 @@
 # =========================
 # Core Runtime
 # =========================
-discord.py
+# Pinned to master until DAVE (voice E2EE) support lands in a stable release
+discord.py @ git+https://github.com/Rapptz/discord.py@master
 aiohttp
 
 # =========================
@@ -13,3 +14,10 @@ openai
 # Environment / Config
 # =========================
 python-dotenv
+
+# =========================
+# Voice / Music
+# =========================
+PyNaCl       # voice encryption
+davey        # DAVE (Discord voice E2EE) support
+yt-dlp       # YouTube/streaming URL resolution

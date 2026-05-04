@@ -25,6 +25,92 @@ DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4-mini")
 CATEGORIZER_MODEL = os.getenv("OPENAI_CATEGORIZER_MODEL", "gpt-5.4-mini")
 
 
+# Tool schemas the LLM sees on every chat call. These tell GPT what
+# music-related functions exist and when to call them. The LLM picks one
+# (or none) based on the user's message.
+MUSIC_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "play_music",
+            "description": (
+                "Play a song or audio in the user's current voice channel. "
+                "Accepts either a YouTube URL or a free-text search query "
+                "(e.g. 'Pink Floyd Time'). If something is already playing, "
+                "the new track is added to the queue. Use this whenever the "
+                "user asks to play, queue, or put on music."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "URL or search query for the track to play.",
+                    }
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "skip_track",
+            "description": "Skip the currently playing track and move to the next in queue.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "pause_music",
+            "description": "Pause the currently playing track.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "resume_music",
+            "description": "Resume a paused track.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "stop_music",
+            "description": "Stop playback and clear the entire queue. Bot stays in the voice channel.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "leave_voice",
+            "description": "Disconnect from the voice channel entirely.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "now_playing",
+            "description": "Get the title of the currently playing track.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_queue",
+            "description": "List the upcoming tracks in the queue.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+]
+
+
 async def categorize_message(message):
     """Classify a message into one or more configured categories.
 
@@ -49,8 +135,6 @@ async def categorize_message(message):
             ],
         )
         output_text = response.choices[0].message.content.strip()
-        # Same filtering approach as before: keep only category names that
-        # actually appear in the model's output.
         return [cat for cat in CATEGORY_LIST if cat in output_text]
 
     except (APIError, APIConnectionError, RateLimitError) as e:
@@ -61,41 +145,75 @@ async def categorize_message(message):
         return []
 
 
-async def send_to_openai(payload):
+async def send_to_openai(payload, tools=None):
     """Send a chat completion request and return a dict-shaped response.
 
-    Accepts the same payload shape handlers.py already builds:
-        {"model": "...", "messages": [...], "temperature": 0.5}
+    Accepts the payload shape handlers.py builds:
+        {"messages": [...], "temperature": 0.5}
 
-    Returns a dict matching the legacy HTTP response shape so handlers.py's
-    `data["choices"][0]["message"]["content"]` parsing keeps working:
+    If `tools` is provided, the LLM may return a tool-call instead of text.
+    The returned dict uses one of two shapes:
+
+      Text response:
         {"choices": [{"message": {"content": "..."}}]}
+
+      Tool-call response:
+        {"choices": [{"message": {
+            "content": None,
+            "tool_calls": [
+                {"id": "...", "name": "...", "arguments": {...}},
+                ...
+            ]
+        }}]}
 
     Returns None on failure.
     """
     try:
-        # Default model if handlers.py didn't specify one (it does, but be safe)
         model = payload.get("model", DEFAULT_MODEL)
         messages = payload["messages"]
         temperature = payload.get("temperature", 0.5)
 
-        response = await _client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=temperature,
-        )
+        kwargs = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+        }
+        if tools:
+            kwargs["tools"] = tools
 
-        # Normalize Pydantic response back to the dict shape handlers.py expects.
-        # If you later rewrite process_openai_response to take the SDK object
-        # directly, you can drop this normalization.
-        return {
-            "choices": [
-                {
+        response = await _client.chat.completions.create(**kwargs)
+        msg = response.choices[0].message
+
+        # Normalize the response. If the model called tools, surface them in
+        # a structured way so handlers.py can dispatch.
+        if msg.tool_calls:
+            tool_calls = []
+            for tc in msg.tool_calls:
+                try:
+                    args = json.loads(tc.function.arguments) if tc.function.arguments else {}
+                except json.JSONDecodeError:
+                    args = {}
+                tool_calls.append({
+                    "id": tc.id,
+                    "name": tc.function.name,
+                    "arguments": args,
+                })
+            return {
+                "choices": [{
                     "message": {
-                        "content": response.choices[0].message.content,
+                        "content": msg.content,  # may be None when tool-calling
+                        "tool_calls": tool_calls,
                     }
+                }]
+            }
+
+        # Plain text response — same shape as before
+        return {
+            "choices": [{
+                "message": {
+                    "content": msg.content,
                 }
-            ]
+            }]
         }
 
     except RateLimitError as e:

@@ -15,7 +15,8 @@ from utils import (
     get_current_pst_date,
     get_server_info,
 )
-from openai_utils import categorize_message, send_to_openai
+from openai_utils import categorize_message, send_to_openai, MUSIC_TOOLS
+from music import voice_manager
 
 logger = logging.getLogger(__name__)
 
@@ -141,11 +142,51 @@ def build_instruction(categories, bot_display_name, server_name):
     return instruction
 
 
+async def _execute_tool_call(tool_call, message):
+    """Run a single LLM-requested tool call and return the result string.
+
+    The result string is sent back to the LLM as the tool result, which the
+    LLM then uses to compose its final chat reply.
+    """
+    name = tool_call["name"]
+    args = tool_call["arguments"]
+    guild = message.guild
+    requester = message.author
+
+    logger.info(f"  tool call: {name}({args})")
+
+    try:
+        if name == "play_music":
+            return await voice_manager.play(guild, requester, args.get("query", ""))
+        elif name == "skip_track":
+            return await voice_manager.skip(guild)
+        elif name == "pause_music":
+            return await voice_manager.pause(guild)
+        elif name == "resume_music":
+            return await voice_manager.resume(guild)
+        elif name == "stop_music":
+            return await voice_manager.stop(guild)
+        elif name == "leave_voice":
+            return await voice_manager.leave(guild)
+        elif name == "now_playing":
+            return await voice_manager.now_playing(guild)
+        elif name == "get_queue":
+            return await voice_manager.get_queue(guild)
+        else:
+            return f"Unknown tool: {name}"
+    except Exception as e:
+        logger.error(f"  tool {name} raised: {e}")
+        return f"Tool error: {e}"
+
+
 async def handle_bot_mention(message, client):
     """Handle a message that mentions the bot, with structured timing logs.
 
     Runs categorization, history fetch, and server-info gathering all in
-    parallel since none of them depend on each other's results.
+    parallel since none of them depend on each other's results. Then makes
+    an LLM call with music tools available; if the LLM calls a tool, we
+    execute it and make a second LLM call with the tool result so it can
+    compose a natural reply.
     """
     user_name = clean_username(message.author.nick, message.author.name)
     msg_len = len(message.content)
@@ -174,18 +215,19 @@ async def handle_bot_mention(message, client):
     # turns (user/assistant) instead of being stuffed into a system block as a
     # transcript — this stops the model from mimicking transcript formatting
     # in its replies.
-    conversation_payload = {
-        "messages": [
-            {"role": "system", "content": instruction},
-            {"role": "system", "content": context_info},
-            *history_messages,
-            {"role": "user", "content": f"[{user_name}] {user_message}"},
-        ],
-        "temperature": 0.5,
-    }
+    messages = [
+        {"role": "system", "content": instruction},
+        {"role": "system", "content": context_info},
+        *history_messages,
+        {"role": "user", "content": f"[{user_name}] {user_message}"},
+    ]
 
+    # First LLM call — may return text or tool calls
     t_llm = time.perf_counter()
-    response_data = await send_to_openai(conversation_payload)
+    response_data = await send_to_openai(
+        {"messages": messages, "temperature": 0.5},
+        tools=MUSIC_TOOLS,
+    )
     llm_ms = (time.perf_counter() - t_llm) * 1000
 
     if not response_data:
@@ -198,6 +240,56 @@ async def handle_bot_mention(message, client):
         except Exception as e:
             logger.error(f"Failed to send error reply: {e}")
         return
+
+    msg = response_data["choices"][0]["message"]
+    tool_calls = msg.get("tool_calls")
+
+    # If the LLM called tools, run them and ask the LLM again for a final reply
+    if tool_calls:
+        # Append the assistant's tool-call message to the conversation
+        messages.append({
+            "role": "assistant",
+            "content": msg.get("content"),
+            "tool_calls": [
+                {
+                    "id": tc["id"],
+                    "type": "function",
+                    "function": {
+                        "name": tc["name"],
+                        "arguments": json.dumps(tc["arguments"]),
+                    },
+                }
+                for tc in tool_calls
+            ],
+        })
+
+        # Execute each tool, append result message
+        for tc in tool_calls:
+            result = await _execute_tool_call(tc, message)
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc["id"],
+                "content": result,
+            })
+
+        # Second LLM call — composes natural reply using tool results
+        t_llm2 = time.perf_counter()
+        response_data = await send_to_openai(
+            {"messages": messages, "temperature": 0.5},
+        )
+        llm2_ms = (time.perf_counter() - t_llm2) * 1000
+        llm_ms += llm2_ms
+
+        if not response_data:
+            logger.error(f"  follow-up LLM call failed after {llm2_ms:.0f}ms")
+            try:
+                await message.reply(
+                    "Hice la acción pero algo falló al armar la respuesta.",
+                    mention_author=False,
+                )
+            except Exception as e:
+                logger.error(f"Failed to send error reply: {e}")
+            return
 
     response_text = process_openai_response(data=response_data, message=message, client=client)
     await send_response_to_channel(message, response_text)
@@ -258,7 +350,12 @@ def process_openai_response(data, message, client):
         logger.error(f"Unexpected OpenAI API response: {data}")
         return "Sorry, I encountered an issue processing your request."
 
-    response_text = data["choices"][0]["message"]["content"].strip()
+    raw_content = data["choices"][0]["message"]["content"]
+    # If LLM returned tool calls only with no text, give it a generic ack
+    if not raw_content:
+        return "Listo."
+
+    response_text = raw_content.strip()
     bot_display_name = client.user.display_name
     user_name = clean_username(message.author.nick, message.author.name)
 
