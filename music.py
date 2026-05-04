@@ -10,6 +10,7 @@ to the LLM as tool results, which the LLM then uses to compose its chat reply.
 
 import asyncio
 import logging
+import os
 from collections import deque
 from dataclasses import dataclass
 from typing import Optional
@@ -19,6 +20,21 @@ import yt_dlp
 
 logger = logging.getLogger(__name__)
 
+# YouTube cookies file. On Render, secret files live at /etc/secrets/<name>.
+# Locally, the file sits in the project root. Pick whichever exists.
+_COOKIES_CANDIDATES = (
+    "/etc/secrets/youtube_cookies.txt",
+    "youtube_cookies.txt",
+)
+_COOKIES_PATH = next(
+    (p for p in _COOKIES_CANDIDATES if os.path.exists(p)),
+    None,
+)
+if _COOKIES_PATH:
+    logger.info(f"[music] using cookies file: {_COOKIES_PATH}")
+else:
+    logger.warning("[music] no youtube_cookies.txt found — yt-dlp will run unauthenticated")
+
 # yt-dlp config — extract audio stream URL only, no download to disk
 _YDL_OPTS = {
     "format": "bestaudio/best",
@@ -27,8 +43,9 @@ _YDL_OPTS = {
     "no_warnings": True,
     "default_search": "ytsearch",
     "source_address": "0.0.0.0",
-    "cookiefile": "youtube_cookies.txt",
 }
+if _COOKIES_PATH:
+    _YDL_OPTS["cookiefile"] = _COOKIES_PATH
 
 # FFmpeg options — reconnect on transient network blips, no video
 _FFMPEG_BEFORE = (
@@ -38,7 +55,6 @@ _FFMPEG_OPTS = "-vn"
 
 # Auto-disconnect after this many seconds of nothing playing or empty VC
 _IDLE_TIMEOUT = 60
-
 
 @dataclass
 class Track:
