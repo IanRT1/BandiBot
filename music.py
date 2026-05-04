@@ -11,6 +11,7 @@ to the LLM as tool results, which the LLM then uses to compose its chat reply.
 import asyncio
 import logging
 import os
+import shutil
 from collections import deque
 from dataclasses import dataclass
 from typing import Optional
@@ -20,18 +21,28 @@ import yt_dlp
 
 logger = logging.getLogger(__name__)
 
-# YouTube cookies file. On Render, secret files live at /etc/secrets/<name>.
-# Locally, the file sits in the project root. Pick whichever exists.
+# YouTube cookies file. On Render, secret files live at /etc/secrets/<name>
+# but that mount is read-only — yt-dlp wants to write session updates back
+# to the file, so copy it to /tmp/ at startup. Updates are lost on container
+# restart, which doesn't matter for us.
 _COOKIES_CANDIDATES = (
     "/etc/secrets/youtube_cookies.txt",
     "youtube_cookies.txt",
 )
-_COOKIES_PATH = next(
+_source_cookies = next(
     (p for p in _COOKIES_CANDIDATES if os.path.exists(p)),
     None,
 )
-if _COOKIES_PATH:
-    logger.info(f"[music] using cookies file: {_COOKIES_PATH}")
+
+_COOKIES_PATH = None
+if _source_cookies:
+    _COOKIES_PATH = "/tmp/youtube_cookies.txt"
+    try:
+        shutil.copy(_source_cookies, _COOKIES_PATH)
+        logger.info(f"[music] copied cookies {_source_cookies} → {_COOKIES_PATH}")
+    except Exception as e:
+        logger.error(f"[music] failed to copy cookies: {e}")
+        _COOKIES_PATH = None
 else:
     logger.warning("[music] no youtube_cookies.txt found — yt-dlp will run unauthenticated")
 
