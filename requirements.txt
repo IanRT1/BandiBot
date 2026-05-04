@@ -20,4 +20,4 @@ python-dotenv
 # =========================
 PyNaCl                   # voice encryption
 davey                    # DAVE (Discord voice E2EE) support
-yt-dlp>=2026.04.01       # YouTube/streaming URL resolution
+yt-dlp>=2026.3.17        # YouTube/streaming URL resolution
