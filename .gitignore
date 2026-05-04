@@ -3,6 +3,7 @@
 .env
 .env.*
 !.env.example
+youtube_cookies.txt
 
 # --- NODE ---
 

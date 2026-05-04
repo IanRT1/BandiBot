@@ -25,8 +25,9 @@ _YDL_OPTS = {
     "noplaylist": True,
     "quiet": True,
     "no_warnings": True,
-    "default_search": "ytsearch",  # plain queries become YouTube searches
-    "source_address": "0.0.0.0",   # avoid IPv6 issues on some networks
+    "default_search": "ytsearch",
+    "source_address": "0.0.0.0",
+    "cookiefile": "youtube_cookies.txt",
 }
 
 # FFmpeg options — reconnect on transient network blips, no video
