@@ -48,7 +48,7 @@ else:
 
 # yt-dlp config — extract audio stream URL only, no download to disk
 _YDL_OPTS = {
-    "format": "bestaudio/best",
+    "format": "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best[acodec!=none]/best",
     "noplaylist": True,
     "quiet": True,
     "no_warnings": True,
