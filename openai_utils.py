@@ -1,4 +1,4 @@
-"""Thin async wrapper around the OpenAI SDK for chat completions and categorization."""
+"""Thin async wrapper around the OpenAI SDK for chat completions."""
 
 import json
 import logging
@@ -8,26 +8,15 @@ from openai import AsyncOpenAI, APIError, APIConnectionError, RateLimitError
 
 logger = logging.getLogger(__name__)
 
-# Load category definitions once at module import (was already doing this)
-with open("config.json", "r", encoding="utf-8") as _f:
-    _CONFIG = json.load(_f)
-
-CATEGORY_LIST = _CONFIG["categories"]
-
 # Single shared async client. Reads OPENAI_API_KEY from env automatically
-# (loaded by main.py via dotenv). Manages its own connection pool — don't
-# create one per request like the old aiohttp code did.
+# (loaded by main.py via dotenv). Manages its own connection pool.
 _client = AsyncOpenAI()
 
-# Models — overridable via .env. Categorization gets a cheaper model since
-# it's a simple classification task.
+# Models — overridable via .env
 DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4-mini")
-CATEGORIZER_MODEL = os.getenv("OPENAI_CATEGORIZER_MODEL", "gpt-5.4-mini")
 
 
-# Tool schemas the LLM sees on every chat call. These tell GPT what
-# music-related functions exist and when to call them. The LLM picks one
-# (or none) based on the user's message.
+# Music tool schemas
 MUSIC_TOOLS = [
     {
         "type": "function",
@@ -110,39 +99,26 @@ MUSIC_TOOLS = [
     },
 ]
 
+# Member activity tool — fetches real-time server presence on demand
+GET_MEMBER_ACTIVITY_TOOL = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_member_activity",
+            "description": (
+                "Get real-time information about who is currently online, "
+                "what they are playing, who is in voice channels, and their "
+                "roles and permissions. Use this when the user asks about "
+                "server members, who is online, who is in voice, or what "
+                "people are doing."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }
+]
 
-async def categorize_message(message):
-    """Classify a message into one or more configured categories.
-
-    Returns a list of category names from CATEGORY_LIST that the model
-    judged applicable. Returns an empty list on any failure.
-    """
-    category_instructions = "\n".join(f"{k}: {v}" for k, v in CATEGORY_LIST.items())
-
-    system_prompt = (
-        "Your whole purpose is to categorize prompt intents. Use only the "
-        f"following categories for labeling: \n{category_instructions}\n "
-        "Identify the best category for the given message and output only "
-        "using the category names from the list that apply."
-    )
-
-    try:
-        response = await _client.chat.completions.create(
-            model=CATEGORIZER_MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f'Discord Message: "{message}"'},
-            ],
-        )
-        output_text = response.choices[0].message.content.strip()
-        return [cat for cat in CATEGORY_LIST if cat in output_text]
-
-    except (APIError, APIConnectionError, RateLimitError) as e:
-        logger.error(f"OpenAI categorization failed: {e}")
-        return []
-    except Exception as e:
-        logger.error(f"Unexpected error during categorization: {e}")
-        return []
+# Combined tool list sent on every chat call
+ALL_TOOLS = MUSIC_TOOLS + GET_MEMBER_ACTIVITY_TOOL
 
 
 async def send_to_openai(payload, tools=None):
@@ -184,8 +160,6 @@ async def send_to_openai(payload, tools=None):
         response = await _client.chat.completions.create(**kwargs)
         msg = response.choices[0].message
 
-        # Normalize the response. If the model called tools, surface them in
-        # a structured way so handlers.py can dispatch.
         if msg.tool_calls:
             tool_calls = []
             for tc in msg.tool_calls:
@@ -201,13 +175,12 @@ async def send_to_openai(payload, tools=None):
             return {
                 "choices": [{
                     "message": {
-                        "content": msg.content,  # may be None when tool-calling
+                        "content": msg.content,
                         "tool_calls": tool_calls,
                     }
                 }]
             }
 
-        # Plain text response — same shape as before
         return {
             "choices": [{
                 "message": {

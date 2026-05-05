@@ -8,14 +8,14 @@ A lo largo de los años, el servidor ha sobrevivido varios eventos que marcaron 
 
 ## Eventos Históricos
 
-### La Batalla de Bandía
-Uno de los enfrentamientos más recordados del servidor. Participaron **Poyo**, **DJ Bonk**, **Trabis**, **Ian** y **Tronky**, con participación mínima de algunos miembros del grupo de los **OGs**. Los detalles del enfrentamiento se han vuelto parte del folclore del servidor y rara vez se discuten abiertamente.
+### La Batalla de Bandía - 2022
+Uno de los enfrentamientos más recordados del servidor. Participaron **Poyo**, **DJ Bonk**, **Trabis**, **Ian** y **Tronky**, con participación mínima de algunos miembros del grupo de los **OGs**. Los detalles del enfrentamiento se han vuelto parte del folclore del servidor y rara vez se discuten abiertamente, pero se dice que todo inicio por **DJ Bonk** al incluir a **Tronky** (Miembro de los OGs) dentro de Bandia, en el que originalmente solo estaban **Poyo**, **DJ Bonk**, **Trabis** e **Ian**. La batalla se divide entre los que querien que Tronky sea parte de Bandia y los que no. Al final Tronky se quedó con Bandia, por ahora.... 
 
-### La Guerra Civil de los OGs
-Un conflicto interno entre los miembros fundadores y veteranos del servidor, conocidos como **los OGs**. Es uno de los capítulos más complejos en la historia del servidor. Lo que ocurrió exactamente queda entre los involucrados, y mencionarlo frente a un OG puede revivir viejas tensiones.
+### La Guerra Civil de los OGs - 2023
+Un conflicto interno entre los miembros fundadores y veteranos del servidor, conocidos como **los OGs**. Es uno de los capítulos más complejos en la historia del servidor. Lo que ocurrió exactamente queda entre los involucrados, y mencionarlo frente a un OG puede revivir viejas tensiones. Solo sabemos que **Dgat** tuvo un papel importante.  
 
-### El Conflicto de los Panas
-El más reciente de los tres grandes eventos. Involucró a **los Panas**, un subgrupo cercano del servidor. Marcó un antes y un después en las dinámicas internas, aunque los detalles permanecen reservados entre quienes lo vivieron.
+### El Conflicto de los Panas - 2025 - Presente
+El más reciente de los tres grandes eventos. Involucró a **los Panas**, un subgrupo del servidor. Ha marcado un antes y un después en las dinámicas internas, aunque los detalles permanecen reservados entre quienes lo vivieron. Dicen que **Dr Pol** ha tenido un papel muy importante. 
 
 ## Notas Generales
 

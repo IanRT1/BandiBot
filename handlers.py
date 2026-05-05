@@ -15,7 +15,7 @@ from utils import (
     get_current_pst_date,
     get_server_info,
 )
-from openai_utils import categorize_message, send_to_openai, MUSIC_TOOLS
+from openai_utils import send_to_openai, ALL_TOOLS
 from music import voice_manager
 
 logger = logging.getLogger(__name__)
@@ -36,22 +36,20 @@ _PACIFIC = ZoneInfo("America/Los_Angeles")
 
 
 def _strip_bot_mentions(message, client):
-    """
-    Remove bot mentions from message content cleanly.
-
-    Replaces the original `content.split()[0]` + `replace(...)` approach,
-    which broke when the mention wasn't the first token or appeared
-    multiple times in the message.
-    """
+    """Remove bot mentions from message content cleanly."""
     content = message.content
     for mention_str in (client.user.mention, f"<@!{client.user.id}>"):
         content = content.replace(mention_str, "")
     return content.strip()
 
 
-def build_context_info(message, categories, client, server_info):
-    """Build context block for the system prompt. server_info is passed in
-    so we don't recompute it for the member-activity branch."""
+def build_context_info(message, client):
+    """Build base context block for the system prompt.
+
+    No longer takes categories or server_info — member activity is fetched
+    on-demand via the get_member_activity tool instead of being pre-computed
+    and conditionally included.
+    """
     user_nick_or_name = clean_username(message.author.nick, message.author.name)
     server_name = message.guild.name
     channel_name = message.channel.name
@@ -62,8 +60,6 @@ def build_context_info(message, categories, client, server_info):
     total_members = message.guild.member_count
     current_pst_time = get_current_pst_time()
     current_pst_date = get_current_pst_date()
-    online_members_count = server_info["online_count"]
-    online_users_list = ", ".join(info[0] for info in server_info["online_members"])
 
     context = dedent(
         f"""
@@ -74,23 +70,26 @@ def build_context_info(message, categories, client, server_info):
         - Server Creation Date: {creation_date}
         - Server Owner: {server_owner}
         - Total Members: {total_members}
-        - Online Members: {online_members_count}
-        - Online Users: {online_users_list}
         - Current Date: {current_pst_date}
         - Server Time: {current_pst_time}
         - Current User: {user_nick_or_name}
         """
     ).strip()
 
-    if "Member Activity" in categories:
-        context += "\n" + build_member_activity_context(server_info)
-
     return context, user_message
 
 
-def build_member_activity_context(server_info):
-    """Build the member-activity context block. Takes pre-computed server_info
-    instead of recomputing it (was being called twice per message)."""
+def build_member_activity_context(guild):
+    """Fetch and format member activity on-demand.
+
+    Called only when the LLM requests it via the get_member_activity tool,
+    not on every message.
+    """
+    server_info = get_server_info(guild)
+
+    online_users_list = ", ".join(info[0] for info in server_info["online_members"])
+    online_count = server_info["online_count"]
+
     online_table = "\n".join(
         f"{m[0]} - Roles: {', '.join(m[1])} - Joined {m[2]} days ago - Permissions: {' '.join(m[3])}"
         for m in server_info["online_members"]
@@ -108,8 +107,9 @@ def build_member_activity_context(server_info):
 
     return dedent(
         f"""
-        **Member Activities**:
-        - Online Members:
+        **Member Activity**:
+        - Online: {online_count} ({online_users_list})
+        - Online Members Detail:
         {online_table}
         - Current Activities: {playing_info}
         - Members in Voice Chat: {voice_chat_info}
@@ -117,12 +117,11 @@ def build_member_activity_context(server_info):
     ).strip()
 
 
-def build_instruction(categories, bot_display_name, server_name):
-    """Build the system instruction from config.json (loaded once at module level).
+def build_instruction(bot_display_name, server_name):
+    """Build the system instruction from config.json.
 
-    The `initial` instruction in config.json supports {bot_display_name} and
-    {server_name} placeholders, which are filled in here. Static server lore
-    from server_info.md is appended if present.
+    No longer takes categories — special instructions were tied to
+    categorization which has been removed.
     """
     instruction = _CONFIG["instructions"]["initial"].format(
         bot_display_name=bot_display_name,
@@ -132,22 +131,19 @@ def build_instruction(categories, bot_display_name, server_name):
     if _SERVER_LORE:
         instruction += f"\n\n# Server-specific knowledge:\n{_SERVER_LORE}"
 
-    special_instructions = _CONFIG["special_instructions"]
-    for category in categories:
-        if category in special_instructions:
-            instruction += (
-                f"\nThere are your special instructions for this message: "
-                f"{special_instructions[category]}"
-            )
     return instruction
 
 
-async def _execute_tool_call(tool_call, message):
-    """Run a single LLM-requested tool call and return the result string.
+def _is_music_tool(name: str) -> bool:
+    """Return True if the tool name is a music-related tool."""
+    return name in {
+        "play_music", "skip_track", "pause_music", "resume_music",
+        "stop_music", "leave_voice", "now_playing", "get_queue",
+    }
 
-    The result string is sent back to the LLM as the tool result, which the
-    LLM then uses to compose its final chat reply.
-    """
+
+async def _execute_tool_call(tool_call, message):
+    """Run a single LLM-requested tool call and return the result string."""
     name = tool_call["name"]
     args = tool_call["arguments"]
     guild = message.guild
@@ -157,7 +153,30 @@ async def _execute_tool_call(tool_call, message):
 
     try:
         if name == "play_music":
-            return await voice_manager.play(guild, requester, args.get("query", ""))
+            result = await voice_manager.play(guild, requester, args.get("query", ""))
+            player = voice_manager.get_player(guild)
+
+            if result.startswith("Now playing:"):
+                from now_playing_view import post_now_playing
+                track = player.current
+                if track:
+                    await post_now_playing(
+                        message.channel,
+                        player,
+                        title=track.title,
+                        artist=track.artist,
+                        duration_seconds=track.duration,
+                        queue_size=len(player.queue),
+                        requested_by=track.requested_by,
+                        thumbnail_url=track.thumbnail,
+                    )
+
+            elif result.startswith("Queued"):
+                from now_playing_view import update_now_playing_queue
+                await update_now_playing_queue(player, len(player.queue))
+
+            return result
+
         elif name == "skip_track":
             return await voice_manager.skip(guild)
         elif name == "pause_music":
@@ -172,21 +191,24 @@ async def _execute_tool_call(tool_call, message):
             return await voice_manager.now_playing(guild)
         elif name == "get_queue":
             return await voice_manager.get_queue(guild)
+        elif name == "get_member_activity":
+            return await asyncio.to_thread(build_member_activity_context, guild)
         else:
             return f"Unknown tool: {name}"
+
     except Exception as e:
         logger.error(f"  tool {name} raised: {e}")
         return f"Tool error: {e}"
 
-
 async def handle_bot_mention(message, client):
-    """Handle a message that mentions the bot, with structured timing logs.
+    """Handle a message that mentions the bot.
 
-    Runs categorization, history fetch, and server-info gathering all in
-    parallel since none of them depend on each other's results. Then makes
-    an LLM call with music tools available; if the LLM calls a tool, we
-    execute it and make a second LLM call with the tool result so it can
-    compose a natural reply.
+    Flow:
+    - Fetch history only (no pre-computed server_info, no categorization)
+    - Single LLM call with all tools available
+    - If music tool called: execute → lightweight reply call (no full context)
+    - If get_member_activity called: execute → full context reply call
+    - If no tool: use first response directly
     """
     user_name = clean_username(message.author.nick, message.author.name)
     msg_len = len(message.content)
@@ -194,27 +216,19 @@ async def handle_bot_mention(message, client):
 
     logger.info(f"→ {user_name} ({msg_len} chars): {message.content[:80]!r}")
 
+    # Fetch history only — server info deferred to tool calls
     t_prep = time.perf_counter()
-    categories, history_messages, server_info = await asyncio.gather(
-        categorize_message(message.content),
-        fetch_recent_messages(message.channel, client, limit=20),
-        asyncio.to_thread(get_server_info, message.guild),
-    )
+    history_messages = await fetch_recent_messages(message.channel, client, limit=20)
     prep_ms = (time.perf_counter() - t_prep) * 1000
 
-    logger.info(f"  categorized as {categories or ['(none)']} | prep took {prep_ms:.0f}ms")
+    logger.info(f"  prep took {prep_ms:.0f}ms")
 
-    context_info, user_message = build_context_info(message, categories, client, server_info)
+    context_info, user_message = build_context_info(message, client)
     instruction = build_instruction(
-        categories,
         client.user.display_name,
         message.guild.name,
     )
 
-    # Build the full message list. History is spliced in as actual role-tagged
-    # turns (user/assistant) instead of being stuffed into a system block as a
-    # transcript — this stops the model from mimicking transcript formatting
-    # in its replies.
     messages = [
         {"role": "system", "content": instruction},
         {"role": "system", "content": context_info},
@@ -222,11 +236,11 @@ async def handle_bot_mention(message, client):
         {"role": "user", "content": f"[{user_name}] {user_message}"},
     ]
 
-    # First LLM call — may return text or tool calls
+    # Single LLM call — decides to chat or call a tool
     t_llm = time.perf_counter()
     response_data = await send_to_openai(
         {"messages": messages, "temperature": 0.5},
-        tools=MUSIC_TOOLS,
+        tools=ALL_TOOLS,
     )
     llm_ms = (time.perf_counter() - t_llm) * 1000
 
@@ -244,9 +258,10 @@ async def handle_bot_mention(message, client):
     msg = response_data["choices"][0]["message"]
     tool_calls = msg.get("tool_calls")
 
-    # If the LLM called tools, run them and ask the LLM again for a final reply
     if tool_calls:
-        # Append the assistant's tool-call message to the conversation
+        called_music = any(_is_music_tool(tc["name"]) for tc in tool_calls)
+
+        # Append assistant's tool-call turn
         messages.append({
             "role": "assistant",
             "content": msg.get("content"),
@@ -263,7 +278,7 @@ async def handle_bot_mention(message, client):
             ],
         })
 
-        # Execute each tool, append result message
+        # Execute all tools, append results
         for tc in tool_calls:
             result = await _execute_tool_call(tc, message)
             messages.append({
@@ -272,10 +287,46 @@ async def handle_bot_mention(message, client):
                 "content": result,
             })
 
-        # Second LLM call — composes natural reply using tool results
+        # Second LLM call to compose the reply.
+        # Music commands get a lightweight prompt — no need for full server
+        # context or history just to say "Listo, poniendo X".
+        if called_music:
+            tool_results = [m["content"] for m in messages if m.get("role") == "tool"]
+            reply_messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        f"You are {client.user.display_name}, a chill Discord bot. "
+                        f"Respond naturally in the same language as the user. "
+                        f"Keep it short — one or two sentences max."
+                    ),
+                },
+                {"role": "user", "content": f"[{user_name}] {user_message}"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": tc["id"],
+                            "type": "function",
+                            "function": {
+                                "name": tc["name"],
+                                "arguments": json.dumps(tc["arguments"]),
+                            },
+                        }
+                        for tc in tool_calls
+                    ],
+                },
+                *[{"role": "tool", "tool_call_id": tc["id"], "content": r}
+                for tc, r in zip(tool_calls, tool_results)],
+            ]
+        else:
+            # Non-music tools (member activity etc.) — use full context
+            reply_messages = messages
+
         t_llm2 = time.perf_counter()
         response_data = await send_to_openai(
-            {"messages": messages, "temperature": 0.5},
+            {"messages": reply_messages, "temperature": 0.5},
         )
         llm2_ms = (time.perf_counter() - t_llm2) * 1000
         llm_ms += llm2_ms
@@ -302,19 +353,12 @@ async def handle_bot_mention(message, client):
 
 
 async def fetch_recent_messages(channel, client, limit=20):
-    """Fetch recent messages and return them as a list of role-tagged
-    OpenAI message dicts (chronological order).
-
-    Past bot messages → role 'assistant' (clean content, no name prefix).
-    Past user messages → role 'user' with '[Name] content' format so the
-    model knows who said what without seeing transcript-style 'Name:' lines.
-    """
+    """Fetch recent messages and return them as role-tagged OpenAI message dicts."""
     messages = [msg async for msg in channel.history(limit=limit)]
     messages.reverse()
 
     bot_id = client.user.id
 
-    # Build a member lookup once for cleaning up @mentions inside message content
     member_mention_map = {
         member.mention: clean_username(member.nick, member.name)
         for member in channel.guild.members
@@ -322,7 +366,6 @@ async def fetch_recent_messages(channel, client, limit=20):
 
     history = []
     for msg in messages:
-        # Skip empty messages (e.g. embeds-only)
         if not msg.content:
             continue
 
@@ -331,10 +374,8 @@ async def fetch_recent_messages(channel, client, limit=20):
             content = content.replace(mention_str, replacement)
 
         if msg.author.id == bot_id:
-            # Bot's past messages — clean assistant turns, no name prefix
             history.append({"role": "assistant", "content": content})
         else:
-            # User messages — tag with the speaker's name in brackets
             if isinstance(msg.author, discord.Member):
                 speaker = clean_username(msg.author.nick, msg.author.name)
             else:
@@ -351,7 +392,6 @@ def process_openai_response(data, message, client):
         return "Sorry, I encountered an issue processing your request."
 
     raw_content = data["choices"][0]["message"]["content"]
-    # If LLM returned tool calls only with no text, give it a generic ack
     if not raw_content:
         return "Listo."
 
@@ -359,7 +399,6 @@ def process_openai_response(data, message, client):
     bot_display_name = client.user.display_name
     user_name = clean_username(message.author.nick, message.author.name)
 
-    # Patterns the model sometimes leaks from the system prompt format
     patterns_to_strip = [
         re.compile(r"^" + re.escape(bot_display_name) + r":"),
         re.compile(r"^\[\d{1,2}:\d{2} (AM|PM)\] " + re.escape(bot_display_name) + r":"),
@@ -374,7 +413,7 @@ def process_openai_response(data, message, client):
 
 
 async def send_response_to_channel(message, response_text):
-    """Send the bot's response as a native Discord reply to the user's message."""
+    """Send the bot's response as a native Discord reply."""
     try:
         await message.reply(response_text, mention_author=False)
     except Exception as e:
@@ -385,5 +424,4 @@ async def send_response_to_channel(message, response_text):
                 mention_author=False,
             )
         except Exception as e2:
-            # If even the fallback fails, log and give up — don't crash the handler
             logger.error(f"Fallback send also failed: {e2}")
