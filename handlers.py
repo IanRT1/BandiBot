@@ -20,17 +20,17 @@ from music import voice_manager
 
 logger = logging.getLogger(__name__)
 
-# Load config once at import time, not on every message
-with open("config.json", "r", encoding="utf-8") as _f:
-    _CONFIG = json.load(_f)
+# Load instructions template once at import time
+with open("instructions.txt", "r", encoding="utf-8") as _f:
+    _INSTRUCTIONS_TEMPLATE = _f.read().strip()
+logger.info(f"Loaded instructions.txt ({len(_INSTRUCTIONS_TEMPLATE)} chars)")
 
-# Load static server lore (optional). Sent to the LLM on every message,
-# so keep the file lean — extra tokens cost money. Reloaded only on restart.
+# Load static server lore once at import time
 _SERVER_LORE = ""
-if os.path.exists("server_info.md"):
-    with open("server_info.md", "r", encoding="utf-8") as _f:
+if os.path.exists("server_info.txt"):
+    with open("server_info.txt", "r", encoding="utf-8") as _f:
         _SERVER_LORE = _f.read().strip()
-    logger.info(f"Loaded server_info.md ({len(_SERVER_LORE)} chars)")
+    logger.info(f"Loaded server_info.txt ({len(_SERVER_LORE)} chars)")
 
 _PACIFIC = ZoneInfo("America/Los_Angeles")
 
@@ -46,9 +46,8 @@ def _strip_bot_mentions(message, client):
 def build_context_info(message, client):
     """Build base context block for the system prompt.
 
-    No longer takes categories or server_info — member activity is fetched
-    on-demand via the get_member_activity tool instead of being pre-computed
-    and conditionally included.
+    Member activity is fetched on-demand via the get_member_activity tool.
+    Server lore is fetched on-demand via the get_server_info tool.
     """
     user_nick_or_name = clean_username(message.author.nick, message.author.name)
     server_name = message.guild.name
@@ -79,11 +78,21 @@ def build_context_info(message, client):
     return context, user_message
 
 
+def build_server_info_context(question: str = "") -> str:
+    """Return server lore from server_info.txt."""
+    if not _SERVER_LORE:
+        return "No server info available."
+    return (
+        "The following is the official server history and lore. "
+        "Treat it as confirmed canon and answer based on it directly:\n\n"
+        + _SERVER_LORE
+    )
+
+
 def build_member_activity_context(guild):
     """Fetch and format member activity on-demand.
 
-    Called only when the LLM requests it via the get_member_activity tool,
-    not on every message.
+    Called only when the LLM requests it via the get_member_activity tool.
     """
     server_info = get_server_info(guild)
 
@@ -118,27 +127,19 @@ def build_member_activity_context(guild):
 
 
 def build_instruction(bot_display_name, server_name):
-    """Build the system instruction from config.json.
-
-    No longer takes categories — special instructions were tied to
-    categorization which has been removed.
-    """
-    instruction = _CONFIG["instructions"]["initial"].format(
+    """Build the system instruction from instructions.txt."""
+    return _INSTRUCTIONS_TEMPLATE.format(
         bot_display_name=bot_display_name,
         server_name=server_name,
     )
-
-    if _SERVER_LORE:
-        instruction += f"\n\n# Server-specific knowledge:\n{_SERVER_LORE}"
-
-    return instruction
 
 
 def _is_music_tool(name: str) -> bool:
     """Return True if the tool name is a music-related tool."""
     return name in {
         "play_music", "skip_track", "pause_music", "resume_music",
-        "stop_music", "leave_voice", "now_playing", "get_queue",
+        "stop_music", "leave_voice", "now_playing", "get_queue", 
+        "move_track", "delete_track",
     }
 
 
@@ -153,7 +154,14 @@ async def _execute_tool_call(tool_call, message):
 
     try:
         if name == "play_music":
-            result = await voice_manager.play(guild, requester, args.get("query", ""))
+            try:
+                result = await asyncio.wait_for(
+                    voice_manager.play(guild, requester, args.get("query", "")),
+                    timeout=30.0,
+                )
+            except asyncio.TimeoutError:
+                return "Took too long to resolve that track. Try again."
+
             player = voice_manager.get_player(guild)
 
             if result.startswith("Now playing:"):
@@ -191,6 +199,36 @@ async def _execute_tool_call(tool_call, message):
             return await voice_manager.now_playing(guild)
         elif name == "get_queue":
             return await voice_manager.get_queue(guild)
+        elif name == "move_track":
+            from_pos = args.get("from_position")
+            to_pos = args.get("to_position")
+            if from_pos is None:
+                query = args.get("track_name", "").lower()
+                player = voice_manager.get_player(guild)
+                queue_list = list(player.queue)
+                match = next((i+1 for i, t in enumerate(queue_list) if query in t.title.lower()), None)
+                if not match:
+                    return f"Could not find '{query}' in queue."
+                from_pos = match
+            return await voice_manager.move_track(guild, int(from_pos), int(to_pos))
+        elif name == "delete_track":
+            position = args.get("position")
+            if position is None:
+                query = args.get("track_name", "").lower()
+                player = voice_manager.get_player(guild)
+                queue_list = list(player.queue)
+                if query in ("last", "last song", "última", "última canción"):
+                    position = len(queue_list)
+                else:
+                    match = next((i+1 for i, t in enumerate(queue_list) if query in t.title.lower()), None)
+                    if not match:
+                        return f"Could not find '{query}' in queue."
+                    position = match
+            return await voice_manager.delete_track(guild, int(position))
+        elif name == "get_server_info":
+            question = args.get("question", "")
+            result = build_server_info_context(question)
+            return result
         elif name == "get_member_activity":
             return await asyncio.to_thread(build_member_activity_context, guild)
         else:
@@ -200,155 +238,154 @@ async def _execute_tool_call(tool_call, message):
         logger.error(f"  tool {name} raised: {e}")
         return f"Tool error: {e}"
 
+
 async def handle_bot_mention(message, client):
     """Handle a message that mentions the bot.
 
     Flow:
-    - Fetch history only (no pre-computed server_info, no categorization)
+    - Fetch history only
     - Single LLM call with all tools available
-    - If music tool called: execute → lightweight reply call (no full context)
-    - If get_member_activity called: execute → full context reply call
+    - If music tool called: execute → lightweight reply call
+    - If get_member_activity or get_server_info called: execute → full context reply call
     - If no tool: use first response directly
     """
     user_name = clean_username(message.author.nick, message.author.name)
     msg_len = len(message.content)
     t_start = time.perf_counter()
+    total_tokens = 0
 
     logger.info(f"→ {user_name} ({msg_len} chars): {message.content[:80]!r}")
 
-    # Fetch history only — server info deferred to tool calls
-    t_prep = time.perf_counter()
-    history_messages = await fetch_recent_messages(message.channel, client, limit=20)
-    prep_ms = (time.perf_counter() - t_prep) * 1000
+    async with message.channel.typing():
+        t_prep = time.perf_counter()
+        history_messages = await fetch_recent_messages(message.channel, client, limit=20)
+        prep_ms = (time.perf_counter() - t_prep) * 1000
 
-    logger.info(f"  prep took {prep_ms:.0f}ms")
+        logger.info(f"  prep took {prep_ms:.0f}ms")
 
-    context_info, user_message = build_context_info(message, client)
-    instruction = build_instruction(
-        client.user.display_name,
-        message.guild.name,
-    )
-
-    messages = [
-        {"role": "system", "content": instruction},
-        {"role": "system", "content": context_info},
-        *history_messages,
-        {"role": "user", "content": f"[{user_name}] {user_message}"},
-    ]
-
-    # Single LLM call — decides to chat or call a tool
-    t_llm = time.perf_counter()
-    response_data = await send_to_openai(
-        {"messages": messages, "temperature": 0.5},
-        tools=ALL_TOOLS,
-    )
-    llm_ms = (time.perf_counter() - t_llm) * 1000
-
-    if not response_data:
-        logger.error(f"  LLM call failed after {llm_ms:.0f}ms")
-        try:
-            await message.reply(
-                "Sorry, I encountered an issue processing your request. Please try again later.",
-                mention_author=False,
-            )
-        except Exception as e:
-            logger.error(f"Failed to send error reply: {e}")
-        return
-
-    msg = response_data["choices"][0]["message"]
-    tool_calls = msg.get("tool_calls")
-
-    if tool_calls:
-        called_music = any(_is_music_tool(tc["name"]) for tc in tool_calls)
-
-        # Append assistant's tool-call turn
-        messages.append({
-            "role": "assistant",
-            "content": msg.get("content"),
-            "tool_calls": [
-                {
-                    "id": tc["id"],
-                    "type": "function",
-                    "function": {
-                        "name": tc["name"],
-                        "arguments": json.dumps(tc["arguments"]),
-                    },
-                }
-                for tc in tool_calls
-            ],
-        })
-
-        # Execute all tools, append results
-        for tc in tool_calls:
-            result = await _execute_tool_call(tc, message)
-            messages.append({
-                "role": "tool",
-                "tool_call_id": tc["id"],
-                "content": result,
-            })
-
-        # Second LLM call to compose the reply.
-        # Music commands get a lightweight prompt — no need for full server
-        # context or history just to say "Listo, poniendo X".
-        if called_music:
-            tool_results = [m["content"] for m in messages if m.get("role") == "tool"]
-            reply_messages = [
-                {
-                    "role": "system",
-                    "content": (
-                        f"You are {client.user.display_name}, a chill Discord bot. "
-                        f"Respond naturally in the same language as the user. "
-                        f"Keep it short — one or two sentences max."
-                    ),
-                },
-                {"role": "user", "content": f"[{user_name}] {user_message}"},
-                {
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [
-                        {
-                            "id": tc["id"],
-                            "type": "function",
-                            "function": {
-                                "name": tc["name"],
-                                "arguments": json.dumps(tc["arguments"]),
-                            },
-                        }
-                        for tc in tool_calls
-                    ],
-                },
-                *[{"role": "tool", "tool_call_id": tc["id"], "content": r}
-                for tc, r in zip(tool_calls, tool_results)],
-            ]
-        else:
-            # Non-music tools (member activity etc.) — use full context
-            reply_messages = messages
-
-        t_llm2 = time.perf_counter()
-        response_data = await send_to_openai(
-            {"messages": reply_messages, "temperature": 0.5},
+        context_info, user_message = build_context_info(message, client)
+        instruction = build_instruction(
+            client.user.display_name,
+            message.guild.name,
         )
-        llm2_ms = (time.perf_counter() - t_llm2) * 1000
-        llm_ms += llm2_ms
+
+        messages = [
+            {"role": "system", "content": instruction},
+            {"role": "system", "content": context_info},
+            *history_messages,
+            {"role": "user", "content": f"[{user_name}] {user_message}"},
+        ]
+
+        t_llm = time.perf_counter()
+        response_data = await send_to_openai(
+            {"messages": messages, "temperature": 0.5},
+            tools=ALL_TOOLS,
+        )
+        llm_ms = (time.perf_counter() - t_llm) * 1000
 
         if not response_data:
-            logger.error(f"  follow-up LLM call failed after {llm2_ms:.0f}ms")
+            logger.error(f"  LLM call failed after {llm_ms:.0f}ms")
             try:
                 await message.reply(
-                    "Hice la acción pero algo falló al armar la respuesta.",
+                    "Sorry, I encountered an issue processing your request. Please try again later.",
                     mention_author=False,
                 )
             except Exception as e:
                 logger.error(f"Failed to send error reply: {e}")
             return
 
-    response_text = process_openai_response(data=response_data, message=message, client=client)
-    await send_response_to_channel(message, response_text)
+        total_tokens += response_data.get("usage", {}).get("total_tokens", 0)
+
+        msg = response_data["choices"][0]["message"]
+        tool_calls = msg.get("tool_calls")
+
+        if tool_calls:
+            called_music = any(_is_music_tool(tc["name"]) for tc in tool_calls)
+
+            messages.append({
+                "role": "assistant",
+                "content": msg.get("content"),
+                "tool_calls": [
+                    {
+                        "id": tc["id"],
+                        "type": "function",
+                        "function": {
+                            "name": tc["name"],
+                            "arguments": json.dumps(tc["arguments"]),
+                        },
+                    }
+                    for tc in tool_calls
+                ],
+            })
+
+            for tc in tool_calls:
+                result = await _execute_tool_call(tc, message)
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc["id"],
+                    "content": result,
+                })
+
+            if called_music:
+                tool_results = [m["content"] for m in messages if m.get("role") == "tool"]
+                reply_messages = [
+                    {
+                        "role": "system",
+                        "content": (
+                            f"You are {client.user.display_name}, a chill Discord bot. "
+                            f"Respond naturally in the same language as the user. "
+                            f"Keep it short — one or two sentences max."
+                        ),
+                    },
+                    {"role": "user", "content": f"[{user_name}] {user_message}"},
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": tc["id"],
+                                "type": "function",
+                                "function": {
+                                    "name": tc["name"],
+                                    "arguments": json.dumps(tc["arguments"]),
+                                },
+                            }
+                            for tc in tool_calls
+                        ],
+                    },
+                    *[{"role": "tool", "tool_call_id": tc["id"], "content": r}
+                    for tc, r in zip(tool_calls, tool_results)],
+                ]
+            else:
+                reply_messages = messages
+
+            t_llm2 = time.perf_counter()
+            response_data = await send_to_openai(
+                {"messages": reply_messages, "temperature": 0.5},
+            )
+            llm2_ms = (time.perf_counter() - t_llm2) * 1000
+            llm_ms += llm2_ms
+
+            if not response_data:
+                logger.error(f"  follow-up LLM call failed after {llm2_ms:.0f}ms")
+                try:
+                    await message.reply(
+                        "Hice la acción pero algo falló al armar la respuesta.",
+                        mention_author=False,
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to send error reply: {e}")
+                return
+
+            total_tokens += response_data.get("usage", {}).get("total_tokens", 0)
+
+        response_text = process_openai_response(data=response_data, message=message, client=client)
+        await send_response_to_channel(message, response_text)
 
     total_ms = (time.perf_counter() - t_start) * 1000
     logger.info(
         f"← replied to {user_name} ({len(response_text)} chars) | "
-        f"llm {llm_ms:.0f}ms | total {total_ms:.0f}ms"
+        f"llm {llm_ms:.0f}ms | tokens {total_tokens} | total {total_ms:.0f}ms"
     )
 
 
@@ -364,6 +401,8 @@ async def fetch_recent_messages(channel, client, limit=20):
         for member in channel.guild.members
     }
 
+    MAX_MESSAGE_CHARS = 500  # cap per message to avoid token explosion
+
     history = []
     for msg in messages:
         if not msg.content:
@@ -372,6 +411,9 @@ async def fetch_recent_messages(channel, client, limit=20):
         content = msg.content
         for mention_str, replacement in member_mention_map.items():
             content = content.replace(mention_str, replacement)
+
+        if len(content) > MAX_MESSAGE_CHARS:
+            content = content[:MAX_MESSAGE_CHARS] + "… [truncated]"
 
         if msg.author.id == bot_id:
             history.append({"role": "assistant", "content": content})

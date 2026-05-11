@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from handlers import handle_bot_mention
+from music import voice_manager
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 if not DISCORD_TOKEN:
@@ -49,6 +50,40 @@ async def on_message(message):
 
     if message.mention_everyone or client.user in message.mentions:
         await handle_bot_mention(message, client)
+
+
+@client.event
+async def on_voice_state_update(member, before, after):
+    # Ignore bot's own voice state changes
+    if member == client.user:
+        return
+
+    guild = member.guild
+    bot_member = guild.me
+
+    # Bot isn't in a voice channel — nothing to do
+    if not bot_member.voice or not bot_member.voice.channel:
+        return
+
+    bot_channel = bot_member.voice.channel
+
+    # Only care if the member left the bot's channel
+    if before.channel != bot_channel:
+        return
+
+    # If bot is now alone, clean up and disconnect
+    if len(bot_channel.members) == 1:  # only the bot remains
+        logger.info(f"[voice] everyone left {bot_channel.name} in {guild.name}, disconnecting")
+        player = voice_manager.get_player(guild)
+        if player._now_playing_view:
+            await player._now_playing_view.stop_updates()
+            if player._now_playing_view.message:
+                try:
+                    await player._now_playing_view.message.delete()
+                except Exception:
+                    pass
+                player._now_playing_view.message = None
+        await player.disconnect()
 
 
 MAX_RETRIES = 10

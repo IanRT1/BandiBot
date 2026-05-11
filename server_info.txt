@@ -14,8 +14,14 @@ Uno de los enfrentamientos más recordados del servidor. Participaron **Poyo**, 
 ### La Guerra Civil de los OGs - 2023
 Un conflicto interno entre los miembros fundadores y veteranos del servidor, conocidos como **los OGs**. Es uno de los capítulos más complejos en la historia del servidor. Lo que ocurrió exactamente queda entre los involucrados, y mencionarlo frente a un OG puede revivir viejas tensiones. Solo sabemos que **Dgat** tuvo un papel importante.  
 
-### El Conflicto de los Panas - 2025 - Presente
+### Primer version de BandiBot - 2023
+Bandibot fue creado por Ian usando el modelo gpt-3.5-turbo siendo uno de los primeros bots para Discord en la historia en implementar modelos de lenguaje. 
+
+### El Conflicto de los Panas - 2025 - 2026
 El más reciente de los tres grandes eventos. Involucró a **los Panas**, un subgrupo del servidor. Ha marcado un antes y un después en las dinámicas internas, aunque los detalles permanecen reservados entre quienes lo vivieron. Dicen que **Dr Pol** ha tenido un papel muy importante. 
+
+### BandiBot actual 2026
+Bandibot se actualizó completamente para mejorar la experiencia integrando el ultimo modelo de lenguaje gpt-5.4, implementado la reproducción de música por YouTube y mejorando la estructura de el bot para mayor eficiencia. 
 
 ## Notas Generales
 
@@ -23,3 +29,4 @@ El más reciente de los tres grandes eventos. Involucró a **los Panas**, un sub
 - "OGs" se refiere a los miembros más antiguos y respetados
 - "Panas" es un subgrupo de amigos muy cercanos dentro del servidor
 - Tronky es figura recurrente en eventos importantes del servidor
+- El origen del nombre BandiBot viene de Bandia y Bot. Bandia siendo el grupo fundador del servidor en el que se encuentra Ian y Bot porque es un bot. 

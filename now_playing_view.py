@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 EMBED_COLOR = 0x4A148C
 EMPTY_COLOR = 0x2C2C3A  # dimmer color for the queue-empty state
-TIMER_INTERVAL = 5     # seconds between footer timer edits
+TIMER_INTERVAL = 10     # seconds between footer timer edits
 
 
 def _format_duration(seconds) -> str:
@@ -43,12 +43,14 @@ def _build_playing_embed(
     queue_size: int,
     requested_by: str,
     duration_str: str = "0:00 / —:—",
+    next_track: Optional[str] = None,
 ) -> discord.Embed:
     embed = discord.Embed(color=EMBED_COLOR)
     embed.set_author(name="✦  Now Playing")
     embed.set_image(url="attachment://now_playing.png")
+    next_line = f"\n⏭ Up next: {next_track[:27]}..." if next_track and len(next_track) > 30 else (f"\n⏭ Up next: {next_track}" if next_track else "")
     embed.set_footer(
-        text=f"⏱ {duration_str}                             🎵 {queue_size} in queue\n👤 Requested by {requested_by}"
+        text=f"⏱ {duration_str}                                 🎵 {queue_size} in queue{next_line}\n👤 Requested by {requested_by}"
     )
     return embed
 
@@ -68,6 +70,9 @@ class NowPlayingView(discord.ui.View):
 
     Owns the timer update task and handles state transitions when songs
     change or the queue empties.
+
+    Row 0: ⏮ Previous | ▶/⏸ Play/Pause | ⏭ Skip | ⏹ Stop
+    Row 1: 📋 Queue    | 🔁 Loop        | 🔀 Shuffle | 🔗 Copy Link
     """
 
     def __init__(self, guild: discord.Guild, player):
@@ -78,13 +83,11 @@ class NowPlayingView(discord.ui.View):
         self._timer_task: Optional[asyncio.Task] = None
 
     def start_updates(self):
-        """Start the background timer task."""
         if self._timer_task:
             self._timer_task.cancel()
         self._timer_task = asyncio.create_task(self._timer_loop())
 
     async def stop_updates(self):
-        """Cancel the timer task."""
         if self._timer_task:
             self._timer_task.cancel()
             self._timer_task = None
@@ -103,12 +106,14 @@ class NowPlayingView(discord.ui.View):
 
                 elapsed = self.player.elapsed_seconds
                 duration_str = f"{_format_duration(int(elapsed))} / {_format_duration(track.duration)}"
+                next_track = self.player.queue[0].title if self.player.queue else None
 
                 try:
                     embed = _build_playing_embed(
                         queue_size=len(self.player.queue),
                         requested_by=track.requested_by,
                         duration_str=duration_str,
+                        next_track=next_track,
                     )
                     await self.message.edit(embed=embed)
                 except discord.NotFound:
@@ -120,95 +125,137 @@ class NowPlayingView(discord.ui.View):
             pass
 
     async def on_track_changed(self, track, queue_size: int):
-        if not self.message:
-            return
+        """New track started — delete and repost if natural transition, edit in place if manual."""
+        natural = self.player._natural_transition
+        self.player._natural_transition = False  # reset immediately after reading
+
+        self.pause_resume_button.emoji = discord.PartialEmoji.from_str("<:pause:1501401053277454416>")
+
         try:
-            png_bytes = await generate_banner(
-                track.title, track.artist, track.thumbnail
-            )
+            png_bytes = await generate_banner(track.title, track.artist, track.thumbnail)
         except Exception as e:
             logger.error(f"[now_playing] banner regen failed: {e}")
             return
 
         duration_str = f"0:00 / {_format_duration(track.duration)}"
+        next_track = self.player.queue[0].title if self.player.queue else None
         embed = _build_playing_embed(
             queue_size=queue_size,
             requested_by=track.requested_by,
             duration_str=duration_str,
+            next_track=next_track,
         )
         file = discord.File(fp=io.BytesIO(png_bytes), filename="now_playing.png")
-        try:
-            await self.message.edit(attachments=[file], embed=embed, view=self)
-            self.start_updates()
-        except Exception as e:
-            logger.error(f"[now_playing] track change edit failed: {e}")
+
+        if natural and self.message:
+            channel = self.message.channel
+            try:
+                await self.message.delete()
+            except Exception:
+                pass
+            self.message = None
+            try:
+                self.message = await channel.send(file=file, embed=embed, view=self)
+            except Exception as e:
+                logger.error(f"[now_playing] repost failed: {e}")
+                return
+        else:
+            if not self.message:
+                return
+            try:
+                await self.message.edit(attachments=[file], embed=embed, view=self)
+            except Exception as e:
+                logger.error(f"[now_playing] track change edit failed: {e}")
+                return
+
+        self.start_updates()
 
     async def on_queue_empty(self):
-        """Called when the queue runs out. Transitions to empty state."""
+        """Queue exhausted — delete the now playing message and post a plain queue-finished embed."""
         await self.stop_updates()
-
-        # Disable all buttons
-        for item in self.children:
-            item.disabled = True
 
         if not self.message:
             return
 
+        channel = self.message.channel
         try:
-            await self.message.edit(
-                attachments=[],
-                embed=_build_empty_embed(),
-                view=self,
-            )
+            await self.message.delete()
+        except Exception:
+            pass
+        self.message = None
+
+        try:
+            await channel.send(embed=_build_empty_embed())
         except Exception as e:
-            logger.error(f"[now_playing] queue empty edit failed: {e}")
+            logger.error(f"[now_playing] queue empty post failed: {e}")
 
-    # ---- Row 1: playback controls ----
+    # ── Row 0: playback controls ──────────────────────────────────────────────
 
-    @discord.ui.button(emoji="⏮", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(emoji="<:previous:1501401326414987335>", style=discord.ButtonStyle.secondary, row=0)  # ⏮ Previous
     async def previous_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("⏮ Previous — coming soon", ephemeral=True)
+        await voice_manager.restart(self.guild)
+        await interaction.response.defer()
 
-    @discord.ui.button(emoji="⏯", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(emoji="<:pause:1501401053277454416>", style=discord.ButtonStyle.secondary, row=0)  # ▶/⏸ Play / Pause
     async def pause_resume_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         player = voice_manager.get_player(self.guild)
         if not player.is_connected:
-            await interaction.response.send_message("Nothing is playing.", ephemeral=True)
+            await interaction.response.defer()
             return
         if player.voice_client.is_paused():
-            result = await voice_manager.resume(self.guild)
+            await voice_manager.resume(self.guild)
+            button.emoji = discord.PartialEmoji.from_str("<:pause:1501401053277454416>")
         else:
-            result = await voice_manager.pause(self.guild)
-        await interaction.response.send_message(result, ephemeral=True)
+            await voice_manager.pause(self.guild)
+            button.emoji = discord.PartialEmoji.from_str("<:play:1501399530170482768>")
+        await interaction.response.edit_message(view=self)
 
-    @discord.ui.button(emoji="⏭", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(emoji="<:skip:1501400932641013962>", style=discord.ButtonStyle.secondary, row=0)  # ⏭ Skip
     async def skip_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        result = await voice_manager.skip(self.guild)
-        await interaction.response.send_message(result, ephemeral=True)
+        await voice_manager.skip(self.guild)
+        await interaction.response.defer()
 
-    @discord.ui.button(emoji="⏹", style=discord.ButtonStyle.danger, row=0)
+    @discord.ui.button(emoji="<:stop:1501401472259067924>", style=discord.ButtonStyle.danger, row=0)  # ⏹ Stop
     async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        result = await voice_manager.stop(self.guild)
-        await interaction.response.send_message(result, ephemeral=True)
+        await self.stop_updates()
+        if self.message:
+            try:
+                await self.message.delete()
+            except Exception:
+                pass
+            self.message = None
+        await voice_manager.stop(self.guild)
+        await interaction.response.defer()
 
-    # ---- Row 2: extras (placeholders for now) ----
+    # ── Row 1: extras ─────────────────────────────────────────────────────────
 
-    @discord.ui.button(emoji="🔉", style=discord.ButtonStyle.secondary, row=1)
-    async def volume_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("🔉 Volume — coming soon", ephemeral=True)
-
-    @discord.ui.button(emoji="🔁", style=discord.ButtonStyle.secondary, row=1)
-    async def loop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("🔁 Loop — coming soon", ephemeral=True)
-
-    @discord.ui.button(emoji="🔀", style=discord.ButtonStyle.secondary, row=1)
-    async def shuffle_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("🔀 Shuffle — coming soon", ephemeral=True)
-
-    @discord.ui.button(emoji="📋", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(emoji="<:queue:1501403076148592650>", style=discord.ButtonStyle.secondary, row=1)  # 📋 Queue
     async def queue_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         result = await voice_manager.get_queue(self.guild)
         await interaction.response.send_message(result, ephemeral=True)
+
+    @discord.ui.button(emoji="<:loop:1501401383142817973>", style=discord.ButtonStyle.secondary, row=1)  # 🔁 Loop
+    async def loop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        is_looping = await voice_manager.toggle_loop(self.guild)
+        button.style = discord.ButtonStyle.primary if is_looping else discord.ButtonStyle.secondary
+        await interaction.response.edit_message(view=self)
+
+    @discord.ui.button(emoji="<:shuffle:1501401429741535345>", style=discord.ButtonStyle.secondary, row=1)  # 🔀 Shuffle
+    async def shuffle_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        player = voice_manager.get_player(self.guild)
+        if len(player.queue) < 2:
+            await interaction.response.send_message("Not enough songs in queue to shuffle.", ephemeral=True)
+            return
+        await voice_manager.shuffle(self.guild)
+        await interaction.response.send_message(f"🔀 Shuffled {len(player.queue)} songs.", ephemeral=True)
+
+    @discord.ui.button(emoji="<:link:1501403040375242842>", style=discord.ButtonStyle.secondary, row=1)  # 🔗 Copy Link
+    async def link_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        player = voice_manager.get_player(self.guild)
+        if not player.current:
+            await interaction.response.send_message("Nothing is playing.", ephemeral=True)
+            return
+        await interaction.response.send_message(player.current.webpage_url, ephemeral=True)
 
 
 async def post_now_playing(
@@ -230,10 +277,12 @@ async def post_now_playing(
 
     duration_str = f"0:00 / {_format_duration(duration_seconds)}"
     file = discord.File(fp=io.BytesIO(png_bytes), filename="now_playing.png")
+    next_track = player.queue[0].title if player.queue else None
     embed = _build_playing_embed(
         queue_size=queue_size,
         requested_by=requested_by,
         duration_str=duration_str,
+        next_track=next_track,
     )
     view = NowPlayingView(channel.guild, player)
 
@@ -258,9 +307,14 @@ async def update_now_playing_queue(player, queue_size: int):
 
     try:
         track = player.current
+        elapsed = player.elapsed_seconds
+        duration_str = f"{_format_duration(int(elapsed))} / {_format_duration(track.duration)}"
+        next_track = player.queue[0].title if player.queue else None
         embed = _build_playing_embed(
             queue_size=queue_size,
             requested_by=track.requested_by,
+            duration_str=duration_str,
+            next_track=next_track,
         )
         await msg.edit(embed=embed)
     except Exception as e:

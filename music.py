@@ -11,6 +11,7 @@ to the LLM as tool results, which the LLM then uses to compose its chat reply.
 import asyncio
 import logging
 import time
+import random
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional
@@ -28,6 +29,7 @@ _YDL_OPTS = {
     "no_warnings": True,
     "default_search": "ytsearch",
     "source_address": "0.0.0.0",
+    "ignoreerrors": True,  # skip unavailable videos instead of crashing
 }
 
 # Default playback volume (0.0 - 1.0). 0.30 = 30% of source level.
@@ -45,7 +47,7 @@ _FFMPEG_OPTS = (
 )
 
 # Auto-disconnect after this many seconds of nothing playing or empty VC
-_IDLE_TIMEOUT = 60
+_IDLE_TIMEOUT = 300
 
 
 @dataclass
@@ -73,7 +75,11 @@ class GuildPlayer:
         self.voice_client: Optional[discord.VoiceClient] = None
         self._idle_task: Optional[asyncio.Task] = None
         self.now_playing_message = None
-        self._now_playing_view = None   # reference to the active NowPlayingView
+        self._now_playing_view = None
+        self._natural_transition = False  # True only when a track ends on its own
+        self._manual_stop = False   # True when skip/restart/stop called manually
+        self._loop = False  # True = repeat current track indefinitely
+
 
     @property
     def is_connected(self) -> bool:
@@ -90,7 +96,6 @@ class GuildPlayer:
             return 0.0
         elapsed = time.time() - self.current.started_at - self.current.total_paused
         if self.current.paused_at is not None:
-            # Currently paused — don't count time since pause started
             elapsed -= (time.time() - self.current.paused_at)
         return max(0.0, elapsed)
 
@@ -122,7 +127,6 @@ class GuildPlayer:
         if not self.queue or not self.is_connected:
             self.current = None
             self._schedule_idle_check()
-            # Signal the view that the queue is empty
             if self._now_playing_view:
                 loop = self.voice_client.client.loop if self.voice_client else asyncio.get_event_loop()
                 asyncio.run_coroutine_threadsafe(
@@ -148,12 +152,15 @@ class GuildPlayer:
         def _after(error):
             if error:
                 logger.error(f"Playback error in {self.guild.name}: {error}")
+            if self._loop and self.current:
+                self.queue.appendleft(self.current)
+            self._natural_transition = not self._manual_stop and not self._loop
+            self._manual_stop = False
             loop.call_soon_threadsafe(self.play_next)
 
         self.voice_client.play(source, after=_after)
         logger.info(f"[music] now playing in {self.guild.name}: {track.title}")
 
-        # Signal the view to update with the new track
         if self._now_playing_view:
             asyncio.run_coroutine_threadsafe(
                 self._now_playing_view.on_track_changed(track, len(self.queue)),
@@ -161,23 +168,19 @@ class GuildPlayer:
             )
 
     def _schedule_idle_check(self):
-        """Start a timer; if still idle after _IDLE_TIMEOUT, disconnect."""
         if self._idle_task:
             self._idle_task.cancel()
         self._idle_task = asyncio.create_task(self._idle_disconnect())
 
     async def _idle_disconnect(self):
-        """Disconnect after _IDLE_TIMEOUT seconds if still idle or VC empty."""
         try:
             await asyncio.sleep(_IDLE_TIMEOUT)
         except asyncio.CancelledError:
             return
-
         if not self.is_connected:
             return
         if self.is_playing:
             return
-
         logger.info(f"[music] idle timeout reached in {self.guild.name}, leaving VC")
         await self.disconnect()
 
@@ -210,7 +213,9 @@ class VoiceManager:
         await player.connect(voice_channel)
         player.queue.append(track)
 
-        if not player.is_playing:
+        is_busy = player.is_playing or (player.is_connected and player.voice_client.is_paused())
+
+        if not is_busy:
             player.play_next()
             return f"Now playing: {track.title}"
         else:
@@ -222,9 +227,19 @@ class VoiceManager:
         if not player.is_playing:
             return "Nothing is playing."
         skipped = player.current.title if player.current else "current track"
-        player.voice_client.stop()  # triggers the after-callback → play_next
+        player._manual_stop = True
+        player.voice_client.stop()
         return f"Skipped: {skipped}"
 
+    async def restart(self, guild) -> str:
+        player = self.get_player(guild)
+        if not player.current:
+            return "Nothing is playing."
+        player._manual_stop = True
+        player.queue.appendleft(player.current)
+        player.voice_client.stop()
+        return f"Restarting: {player.current.title}"
+    
     async def pause(self, guild) -> str:
         player = self.get_player(guild)
         if not player.is_playing:
@@ -250,6 +265,7 @@ class VoiceManager:
             return "Bot is not in a voice channel."
         if player._now_playing_view:
             await player._now_playing_view.on_queue_empty()
+        player._manual_stop = True
         player.queue.clear()
         if player.is_playing:
             player.voice_client.stop()
@@ -278,15 +294,69 @@ class VoiceManager:
         for i, track in enumerate(player.queue, start=1):
             lines.append(f"{i}. {track.title}")
         return "\n".join(lines)
+    
+    async def toggle_loop(self, guild) -> bool:
+        player = self.get_player(guild)
+        player._loop = not player._loop
+        return player._loop
+    
+    async def shuffle(self, guild) -> str:
+        player = self.get_player(guild)
+        if len(player.queue) < 2:
+            return "Not enough songs in queue to shuffle."
+        queue_list = list(player.queue)
+        random.shuffle(queue_list)
+        player.queue = deque(queue_list)
+        return f"Shuffled {len(queue_list)} songs."
+    
+    async def move_track(self, guild, from_pos: int, to_pos: int) -> str:
+        player = self.get_player(guild)
+        if not player.queue:
+            return "Queue is empty."
+        queue_list = list(player.queue)
+        max_pos = len(queue_list)
+        if from_pos < 1 or from_pos > max_pos:
+            return f"Invalid position {from_pos}. Queue has {max_pos} songs."
+        if to_pos < 1 or to_pos > max_pos:
+            return f"Invalid position {to_pos}. Queue has {max_pos} songs."
+        track = queue_list.pop(from_pos - 1)
+        queue_list.insert(to_pos - 1, track)
+        player.queue = deque(queue_list)
+        return f"Moved '{track.title}' from position {from_pos} to {to_pos}."
+    
+    async def delete_track(self, guild, position: int) -> str:
+        player = self.get_player(guild)
+        if not player.queue:
+            return "Queue is empty."
+        queue_list = list(player.queue)
+        max_pos = len(queue_list)
+        if position < 1 or position > max_pos:
+            return f"Invalid position {position}. Queue has {max_pos} songs."
+        track = queue_list.pop(position - 1)
+        player.queue = deque(queue_list)
+        return f"Removed '{track.title}' from the queue."
 
 
 def _resolve_track(query: str, requested_by: str) -> Track:
-    """Run yt-dlp synchronously (called via asyncio.to_thread)."""
+    if not query.startswith("http://") and not query.startswith("https://"):
+        query = f"ytsearch5:{query}"
+
+    logger.info(f"  [yt-dlp] starting resolution for {query!r}")
+    t = time.time()
+
     with yt_dlp.YoutubeDL(_YDL_OPTS) as ydl:
         info = ydl.extract_info(query, download=False)
 
+    logger.info(f"  [yt-dlp] resolved in {time.time() - t:.2f}s")
+
     if "entries" in info:
-        info = info["entries"][0]
+        # Pick first available entry, skipping None (unavailable videos)
+        entry = next((e for e in info["entries"] if e), None)
+        if not entry:
+            raise Exception("No playable results found.")
+        info = entry
+
+    logger.info(f"  [yt-dlp] using: {info.get('title', '?')!r}")
 
     return Track(
         title=info.get("title", "Unknown title"),

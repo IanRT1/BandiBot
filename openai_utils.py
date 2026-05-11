@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 _client = AsyncOpenAI()
 
 # Models — overridable via .env
-DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4-mini")
+DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4-nano")
 
 
 # Music tool schemas
@@ -38,6 +38,56 @@ MUSIC_TOOLS = [
                     }
                 },
                 "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "move_track",
+            "description": "Move a song in the queue to a different position. Can reference the track by its current position number or by name/partial name.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "from_position": {
+                        "type": "integer",
+                        "description": "Current position of the track in the queue (1-based). Optional if track_name is provided.",
+                    },
+                    "to_position": {
+                        "type": "integer",
+                        "description": "Target position in the queue (1-based).",
+                    },
+                    "track_name": {
+                        "type": "string",
+                        "description": "Name or partial name of the track to move. Used if from_position is not provided.",
+                    },
+                },
+                "required": ["to_position"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_track",
+            "description": (
+                "Remove a specific song from the queue without affecting playback. "
+                "Can reference the track by position number, by name/partial name, "
+                "or by recency (e.g. 'the last song you added', 'the one I just queued'). "
+                "Does NOT affect the currently playing track."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "position": {
+                        "type": "integer",
+                        "description": "Queue position of the track to remove (1-based). Optional if track_name is provided.",
+                    },
+                    "track_name": {
+                        "type": "string",
+                        "description": "Name or partial name of the track to remove. Also handles relative references like 'last song'.",
+                    },
+                },
             },
         },
     },
@@ -97,6 +147,7 @@ MUSIC_TOOLS = [
             "parameters": {"type": "object", "properties": {}},
         },
     },
+
 ]
 
 # Member activity tool — fetches real-time server presence on demand
@@ -117,8 +168,34 @@ GET_MEMBER_ACTIVITY_TOOL = [
     }
 ]
 
+# Server info tool — reads from server_info.txt on demand
+GET_SERVER_INFO_TOOL = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_server_info",
+            "description": (
+                "Get information about this Discord server from its history and lore document. "
+                "Use this when the user asks something about the server — its history, rules, "
+                "events, or any other server-specific knowledge. "
+                "Pass the user's question so the response can be tailored to what was asked."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": "The user's question about the server, used to contextualize the response.",
+                    }
+                },
+                "required": ["question"],
+            },
+        },
+    }
+]
+
 # Combined tool list sent on every chat call
-ALL_TOOLS = MUSIC_TOOLS + GET_MEMBER_ACTIVITY_TOOL
+ALL_TOOLS = MUSIC_TOOLS + GET_MEMBER_ACTIVITY_TOOL + GET_SERVER_INFO_TOOL
 
 
 async def send_to_openai(payload, tools=None):
@@ -131,7 +208,7 @@ async def send_to_openai(payload, tools=None):
     The returned dict uses one of two shapes:
 
       Text response:
-        {"choices": [{"message": {"content": "..."}}]}
+        {"choices": [{"message": {"content": "..."}}], "usage": {...}}
 
       Tool-call response:
         {"choices": [{"message": {
@@ -140,7 +217,7 @@ async def send_to_openai(payload, tools=None):
                 {"id": "...", "name": "...", "arguments": {...}},
                 ...
             ]
-        }}]}
+        }}], "usage": {...}}
 
     Returns None on failure.
     """
@@ -160,6 +237,12 @@ async def send_to_openai(payload, tools=None):
         response = await _client.chat.completions.create(**kwargs)
         msg = response.choices[0].message
 
+        usage = {
+            "prompt_tokens": response.usage.prompt_tokens,
+            "completion_tokens": response.usage.completion_tokens,
+            "total_tokens": response.usage.total_tokens,
+        }
+
         if msg.tool_calls:
             tool_calls = []
             for tc in msg.tool_calls:
@@ -178,7 +261,8 @@ async def send_to_openai(payload, tools=None):
                         "content": msg.content,
                         "tool_calls": tool_calls,
                     }
-                }]
+                }],
+                "usage": usage,
             }
 
         return {
@@ -186,7 +270,8 @@ async def send_to_openai(payload, tools=None):
                 "message": {
                     "content": msg.content,
                 }
-            }]
+            }],
+            "usage": usage,
         }
 
     except RateLimitError as e:

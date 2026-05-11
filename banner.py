@@ -113,7 +113,7 @@ async def generate_banner(
 
     if bg:
         bg = _crop_to_square(bg).resize((SIZE, SIZE), Image.Resampling.LANCZOS)
-        bg = bg.filter(ImageFilter.GaussianBlur(radius=2))
+        bg = bg.filter(ImageFilter.GaussianBlur(radius=1))
     else:
         bg = Image.new("RGB", (SIZE, SIZE), (30, 10, 50))
 
