@@ -94,6 +94,18 @@ MUSIC_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "join_voice",
+            "description": (
+                "Join the voice channel that the user is currently in. "
+                "Use this when the user asks the bot to join, come, or enter their voice channel. "
+                "Works even if no music is requested."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "skip_track",
             "description": "Skip the currently playing track and move to the next in queue.",
             "parameters": {"type": "object", "properties": {}},

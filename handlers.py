@@ -36,7 +36,6 @@ _PACIFIC = ZoneInfo("America/Los_Angeles")
 
 
 def _strip_bot_mentions(message, client):
-    """Remove bot mentions from message content cleanly."""
     content = message.content
     for mention_str in (client.user.mention, f"<@!{client.user.id}>"):
         content = content.replace(mention_str, "")
@@ -44,11 +43,6 @@ def _strip_bot_mentions(message, client):
 
 
 def build_context_info(message, client):
-    """Build base context block for the system prompt.
-
-    Member activity is fetched on-demand via the get_member_activity tool.
-    Server lore is fetched on-demand via the get_server_info tool.
-    """
     user_nick_or_name = clean_username(message.author.nick, message.author.name)
     server_name = message.guild.name
     channel_name = message.channel.name
@@ -79,7 +73,6 @@ def build_context_info(message, client):
 
 
 def build_server_info_context(question: str = "") -> str:
-    """Return server lore from server_info.txt."""
     if not _SERVER_LORE:
         return "No server info available."
     return (
@@ -90,10 +83,6 @@ def build_server_info_context(question: str = "") -> str:
 
 
 def build_member_activity_context(guild):
-    """Fetch and format member activity on-demand.
-
-    Called only when the LLM requests it via the get_member_activity tool.
-    """
     server_info = get_server_info(guild)
 
     online_users_list = ", ".join(info[0] for info in server_info["online_members"])
@@ -127,7 +116,6 @@ def build_member_activity_context(guild):
 
 
 def build_instruction(bot_display_name, server_name):
-    """Build the system instruction from instructions.txt."""
     return _INSTRUCTIONS_TEMPLATE.format(
         bot_display_name=bot_display_name,
         server_name=server_name,
@@ -135,16 +123,14 @@ def build_instruction(bot_display_name, server_name):
 
 
 def _is_music_tool(name: str) -> bool:
-    """Return True if the tool name is a music-related tool."""
     return name in {
         "play_music", "skip_track", "pause_music", "resume_music",
-        "stop_music", "leave_voice", "now_playing", "get_queue", 
-        "move_track", "delete_track",
+        "stop_music", "leave_voice", "now_playing", "get_queue",
+        "move_track", "delete_track", "join_voice",
     }
 
 
 async def _execute_tool_call(tool_call, message):
-    """Run a single LLM-requested tool call and return the result string."""
     name = tool_call["name"]
     args = tool_call["arguments"]
     guild = message.guild
@@ -165,23 +151,25 @@ async def _execute_tool_call(tool_call, message):
             player = voice_manager.get_player(guild)
 
             if result.startswith("Now playing:"):
-                from now_playing_view import post_now_playing
-                track = player.current
-                if track:
-                    await post_now_playing(
-                        message.channel,
-                        player,
-                        title=track.title,
-                        artist=track.artist,
-                        duration_seconds=track.duration,
-                        queue_size=len(player.queue),
-                        requested_by=track.requested_by,
-                        thumbnail_url=track.thumbnail,
-                    )
+                if message.channel:  # only post if we have a text channel
+                    from now_playing_view import post_now_playing
+                    track = player.current
+                    if track:
+                        await post_now_playing(
+                            message.channel,
+                            player,
+                            title=track.title,
+                            artist=track.artist,
+                            duration_seconds=track.duration,
+                            queue_size=len(player.queue),
+                            requested_by=track.requested_by,
+                            thumbnail_url=track.thumbnail,
+                        )
 
             elif result.startswith("Queued"):
-                from now_playing_view import update_now_playing_queue
-                await update_now_playing_queue(player, len(player.queue))
+                if message.channel:  # only update if we have a text channel
+                    from now_playing_view import update_now_playing_queue
+                    await update_now_playing_queue(player, len(player.queue))
 
             return result
 
@@ -225,6 +213,15 @@ async def _execute_tool_call(tool_call, message):
                         return f"Could not find '{query}' in queue."
                     position = match
             return await voice_manager.delete_track(guild, int(position))
+        elif name == "join_voice":
+            if not requester.voice or not requester.voice.channel:
+                return "User is not in a voice channel."
+            from voice_listener import voice_listener_manager
+            channel = requester.voice.channel
+            loop = asyncio.get_event_loop()
+            bot_client = guild.me._state._get_client()
+            await voice_listener_manager.start_listening(guild, channel, bot_client, loop)
+            return f"Joined {channel.name}."
         elif name == "get_server_info":
             question = args.get("question", "")
             result = build_server_info_context(question)
@@ -240,15 +237,6 @@ async def _execute_tool_call(tool_call, message):
 
 
 async def handle_bot_mention(message, client):
-    """Handle a message that mentions the bot.
-
-    Flow:
-    - Fetch history only
-    - Single LLM call with all tools available
-    - If music tool called: execute → lightweight reply call
-    - If get_member_activity or get_server_info called: execute → full context reply call
-    - If no tool: use first response directly
-    """
     user_name = clean_username(message.author.nick, message.author.name)
     msg_len = len(message.content)
     t_start = time.perf_counter()
@@ -390,7 +378,6 @@ async def handle_bot_mention(message, client):
 
 
 async def fetch_recent_messages(channel, client, limit=20):
-    """Fetch recent messages and return them as role-tagged OpenAI message dicts."""
     messages = [msg async for msg in channel.history(limit=limit)]
     messages.reverse()
 
@@ -401,7 +388,7 @@ async def fetch_recent_messages(channel, client, limit=20):
         for member in channel.guild.members
     }
 
-    MAX_MESSAGE_CHARS = 500  # cap per message to avoid token explosion
+    MAX_MESSAGE_CHARS = 500
 
     history = []
     for msg in messages:
@@ -428,7 +415,6 @@ async def fetch_recent_messages(channel, client, limit=20):
 
 
 def process_openai_response(data, message, client):
-    """Extract and clean the assistant's response text from the API payload."""
     if "choices" not in data:
         logger.error(f"Unexpected OpenAI API response: {data}")
         return "Sorry, I encountered an issue processing your request."
@@ -455,7 +441,6 @@ def process_openai_response(data, message, client):
 
 
 async def send_response_to_channel(message, response_text):
-    """Send the bot's response as a native Discord reply."""
     try:
         await message.reply(response_text, mention_author=False)
     except Exception as e:

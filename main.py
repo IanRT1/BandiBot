@@ -2,6 +2,7 @@ import logging
 import os
 import random
 import time
+import asyncio
 
 import discord
 import aiohttp
@@ -11,30 +12,26 @@ load_dotenv()
 
 from handlers import handle_bot_mention
 from music import voice_manager
+from voice_listener import voice_listener_manager
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 if not DISCORD_TOKEN:
     raise RuntimeError("DISCORD_TOKEN is not set in .env")
 
-# Logging setup — configures the root logger for the whole app.
-# Other modules just do `logger = logging.getLogger(__name__)` and inherit this.
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_LEVEL = os.getenv("LOG_LEVEL", "DEBUG").upper()
 logging.basicConfig(
     level=LOG_LEVEL,
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%H:%M:%S",
 )
-# Silence library noise — we only want our own structured logs
 logging.getLogger("discord").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("openai").setLevel(logging.WARNING)
+logging.getLogger("openwakeword").setLevel(logging.ERROR)
 
 logger = logging.getLogger(__name__)
 
-# Requires "Server Members Intent" and "Message Content Intent" (and "Presence
-# Intent" if used) toggled ON in the Discord Developer Portal → Bot settings.
 intents = discord.Intents.all()
-
 client = discord.Client(intents=intents)
 
 
@@ -47,32 +44,35 @@ async def on_ready():
 async def on_message(message):
     if message.author == client.user:
         return
-
     if message.mention_everyone or client.user in message.mentions:
         await handle_bot_mention(message, client)
 
 
 @client.event
 async def on_voice_state_update(member, before, after):
-    # Ignore bot's own voice state changes
+    # When the BOT joins a voice channel — start listening automatically
     if member == client.user:
+        if after.channel is not None and before.channel != after.channel:
+            loop = asyncio.get_event_loop()
+            await voice_listener_manager.start_listening(
+                member.guild, after.channel, client, loop
+            )
+        elif after.channel is None:
+            await voice_listener_manager.stop_listening(member.guild)
         return
 
     guild = member.guild
     bot_member = guild.me
 
-    # Bot isn't in a voice channel — nothing to do
     if not bot_member.voice or not bot_member.voice.channel:
         return
 
     bot_channel = bot_member.voice.channel
 
-    # Only care if the member left the bot's channel
     if before.channel != bot_channel:
         return
 
-    # If bot is now alone, clean up and disconnect
-    if len(bot_channel.members) == 1:  # only the bot remains
+    if len(bot_channel.members) == 1:
         logger.info(f"[voice] everyone left {bot_channel.name} in {guild.name}, disconnecting")
         player = voice_manager.get_player(guild)
         if player._now_playing_view:
@@ -84,6 +84,7 @@ async def on_voice_state_update(member, before, after):
                     pass
                 player._now_playing_view.message = None
         await player.disconnect()
+        await voice_listener_manager.stop_listening(guild)
 
 
 MAX_RETRIES = 10
