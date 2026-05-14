@@ -4,8 +4,10 @@ Per-guild state is held in VoiceManager (singleton via module-level instance).
 Tracks are resolved with yt-dlp (URL or search query), played via FFmpeg.
 After 60s of idle/empty VC the bot auto-disconnects.
 
-All public methods return human-readable strings — these are surfaced back
-to the LLM as tool results, which the LLM then uses to compose its chat reply.
+Uses MixerSource from tts.py so TTS can be injected over music without
+pausing or restarting.
+
+Per-guild play lock prevents duplicate queuing from concurrent requests.
 """
 
 import asyncio
@@ -22,7 +24,6 @@ import yt_dlp
 
 logger = logging.getLogger(__name__)
 
-# yt-dlp config — extract audio stream URL only, no download to disk
 _YDL_OPTS = {
     "format": "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best[acodec!=none]/best",
     "noplaylist": True,
@@ -72,6 +73,8 @@ class GuildPlayer:
         self._natural_transition = False
         self._manual_stop = False
         self._loop = False
+        self.text_channel: Optional[discord.TextChannel] = None
+        self.queue_empty_message = None
 
     @property
     def is_connected(self) -> bool:
@@ -119,6 +122,9 @@ class GuildPlayer:
         self.now_playing_message = None
 
     def play_next(self):
+        """Pop the next track and start playing it via MixerSource."""
+        from tts import MixerSource
+
         if not self.queue or not self.is_connected:
             self.current = None
             self._schedule_idle_check()
@@ -136,14 +142,13 @@ class GuildPlayer:
         track.total_paused = 0.0
         self.current = track
 
-        source = discord.PCMVolumeTransformer(
-            discord.FFmpegPCMAudio(
-                track.stream_url,
-                before_options=_FFMPEG_BEFORE,
-                options=_FFMPEG_OPTS,
-            ),
-            volume=DEFAULT_VOLUME,
+        ffmpeg_source = discord.FFmpegPCMAudio(
+            track.stream_url,
+            before_options=_FFMPEG_BEFORE,
+            options=_FFMPEG_OPTS,
         )
+        volume_source = discord.PCMVolumeTransformer(ffmpeg_source, volume=DEFAULT_VOLUME)
+        mixer_source  = MixerSource(volume_source)
 
         loop = self.voice_client.client.loop
 
@@ -157,17 +162,23 @@ class GuildPlayer:
             self._natural_transition = (
                 not self._manual_stop and not self._loop
             )
-
             self._manual_stop = False
             loop.call_soon_threadsafe(self.play_next)
 
-        self.voice_client.play(source, after=_after)
+        self.voice_client.play(mixer_source, after=_after)
         logger.info(
             f"[music] play() called | "
             f"is_playing={self.voice_client.is_playing()} "
             f"is_connected={self.voice_client.is_connected()}"
         )
         logger.info(f"[music] now playing in {self.guild.name}: {track.title}")
+
+        # Notify now playing view to update banner
+        if self._now_playing_view:
+            asyncio.run_coroutine_threadsafe(
+                self._now_playing_view.on_track_changed(track, len(self.queue)),
+                loop,
+            )
 
     def _schedule_idle_check(self):
         if self._idle_task:
@@ -191,11 +202,17 @@ class VoiceManager:
 
     def __init__(self):
         self._players: dict[int, GuildPlayer] = {}
+        self._play_locks: dict[int, asyncio.Lock] = {}
 
     def get_player(self, guild: discord.Guild) -> GuildPlayer:
         if guild.id not in self._players:
             self._players[guild.id] = GuildPlayer(guild)
         return self._players[guild.id]
+
+    def _get_play_lock(self, guild_id: int) -> asyncio.Lock:
+        if guild_id not in self._play_locks:
+            self._play_locks[guild_id] = asyncio.Lock()
+        return self._play_locks[guild_id]
 
     async def play(self, guild, requester_member, query: str) -> str:
         if not requester_member.voice or not requester_member.voice.channel:
@@ -210,17 +227,19 @@ class VoiceManager:
             logger.error(f"[music] resolve failed for {query!r}: {e}")
             return f"Could not resolve track: {e}"
 
-        await player.connect(voice_channel)
-        player.queue.append(track)
+        # Per-guild lock prevents duplicate queuing from concurrent requests
+        async with self._get_play_lock(guild.id):
+            await player.connect(voice_channel)
+            player.queue.append(track)
 
-        is_busy = player.is_playing or (player.is_connected and player.voice_client.is_paused())
+            is_busy = player.is_playing or (player.is_connected and player.voice_client.is_paused())
 
-        if not is_busy:
-            player.play_next()
-            return f"Now playing: {track.title}"
-        else:
-            position = len(player.queue)
-            return f"Queued at position {position}: {track.title}"
+            if not is_busy:
+                player.play_next()
+                return f"Now playing: {track.title}"
+            else:
+                position = len(player.queue)
+                return f"Queued at position {position}: {track.title}"
 
     async def skip(self, guild) -> str:
         player = self.get_player(guild)
@@ -228,7 +247,7 @@ class VoiceManager:
             return "Nothing is playing."
         skipped = player.current.title if player.current else "current track"
         player._manual_stop = True
-        player.voice_client.stop_playing()  # ← stop_playing not stop
+        player.voice_client.stop_playing()
         return f"Skipped: {skipped}"
 
     async def restart(self, guild) -> str:
@@ -237,7 +256,7 @@ class VoiceManager:
             return "Nothing is playing."
         player._manual_stop = True
         player.queue.appendleft(player.current)
-        player.voice_client.stop_playing()  # ← stop_playing not stop
+        player.voice_client.stop_playing()
         return f"Restarting: {player.current.title}"
 
     async def pause(self, guild) -> str:
@@ -268,7 +287,7 @@ class VoiceManager:
         player._manual_stop = True
         player.queue.clear()
         if player.is_playing:
-            player.voice_client.stop_playing()  # ← stop_playing not stop
+            player.voice_client.stop_playing()
         return "Stopped and cleared the queue."
 
     async def leave(self, guild) -> str:

@@ -126,8 +126,16 @@ class NowPlayingView(discord.ui.View):
 
     async def on_track_changed(self, track, queue_size: int):
         """New track started — delete and repost if natural transition, edit in place if manual."""
+        # Delete any lingering queue finished messages
+        if self.player.queue_empty_message:
+            try:
+                await self.player.queue_empty_message.delete()
+            except Exception:
+                pass
+            self.player.queue_empty_message = None
+
         natural = self.player._natural_transition
-        self.player._natural_transition = False  # reset immediately after reading
+        self.player._natural_transition = False
 
         self.pause_resume_button.emoji = discord.PartialEmoji.from_str("<:pause:1501401053277454416>")
 
@@ -185,7 +193,8 @@ class NowPlayingView(discord.ui.View):
         self.message = None
 
         try:
-            await channel.send(embed=_build_empty_embed())
+            msg = await channel.send(embed=_build_empty_embed())
+            self.player.queue_empty_message = msg
         except Exception as e:
             logger.error(f"[now_playing] queue empty post failed: {e}")
 

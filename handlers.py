@@ -126,7 +126,7 @@ def _is_music_tool(name: str) -> bool:
     return name in {
         "play_music", "skip_track", "pause_music", "resume_music",
         "stop_music", "leave_voice", "now_playing", "get_queue",
-        "move_track", "delete_track", "join_voice",
+        "move_track", "delete_track", 
     }
 
 
@@ -150,8 +150,11 @@ async def _execute_tool_call(tool_call, message):
 
             player = voice_manager.get_player(guild)
 
+            if not player.text_channel and message.channel:
+                player.text_channel = message.channel
+
             if result.startswith("Now playing:"):
-                if message.channel:  # only post if we have a text channel
+                if message.channel:
                     from now_playing_view import post_now_playing
                     track = player.current
                     if track:
@@ -167,9 +170,10 @@ async def _execute_tool_call(tool_call, message):
                         )
 
             elif result.startswith("Queued"):
-                if message.channel:  # only update if we have a text channel
+                if message.channel:
                     from now_playing_view import update_now_playing_queue
                     await update_now_playing_queue(player, len(player.queue))
+                    await message.channel.send(result)
 
             return result
 
@@ -221,6 +225,8 @@ async def _execute_tool_call(tool_call, message):
             loop = asyncio.get_event_loop()
             bot_client = guild.me._state._get_client()
             await voice_listener_manager.start_listening(guild, channel, bot_client, loop)
+            player = voice_manager.get_player(guild)
+            player.text_channel = message.channel
             return f"Joined {channel.name}."
         elif name == "get_server_info":
             question = args.get("question", "")
@@ -322,7 +328,8 @@ async def handle_bot_mention(message, client):
                         "content": (
                             f"You are {client.user.display_name}, a chill Discord bot. "
                             f"Respond naturally in the same language as the user. "
-                            f"Keep it short — one or two sentences max."
+                            f"Keep it short — one or two sentences max. "
+                            f"The tool result tells you exactly what happened — confirm it confidently, don't ask for clarification."
                         ),
                     },
                     {"role": "user", "content": f"[{user_name}] {user_message}"},

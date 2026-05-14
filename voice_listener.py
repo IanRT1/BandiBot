@@ -11,6 +11,18 @@ State machine (per user):
   waiting    → audio thread discards all audio (activation sound playing)
   listening  → audio thread feeds Silero VAD, asyncio task monitors silence
   processing → audio thread discards all audio (STT/LLM/TTS running)
+
+Interruption support:
+  Any user can trigger wake word at any time, even if the bot is speaking.
+  When a new wake word fires mid-TTS, the current TTS is cancelled immediately
+  and the new user takes over.
+
+Crypto error recovery:
+  Discord DAVE encryption key rotation can corrupt the receive pipeline.
+  When detected, the sink is restarted automatically.
+
+Music plays continuously via MixerSource — TTS is injected on top,
+no pausing or restarting needed.
 """
 
 import asyncio
@@ -34,19 +46,19 @@ logger = logging.getLogger(__name__)
 
 # ── Toggle ────────────────────────────────────────────────────────────────────
 
-VOICE_ENABLED = True  # Set to False to disable voice commands
+VOICE_ENABLED = True
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 WAKEWORD_MODEL_PATH   = os.path.join(os.path.dirname(__file__), "BandiBot.onnx")
-WAKEWORD_THRESHOLD    = 0.40
-WAKEWORD_COOLDOWN     = 5
+WAKEWORD_THRESHOLD    = 0.10
+WAKEWORD_COOLDOWN     = 2
 HITS_REQUIRED         = 3
 SMOOTHING_WINDOW      = 5
 
 SOURCE_SAMPLE_RATE    = 48000
 OWW_SAMPLE_RATE       = 16000
-OWW_CHUNK_SIZE        = 1280   # required by openWakeWord
+OWW_CHUNK_SIZE        = 1280
 
 VAD_CHUNK_SIZE        = 512
 VAD_SPEECH_THRESHOLD  = 0.6
@@ -120,6 +132,7 @@ class UserCaptureState:
         self.last_speech_time: float = 0.0
         self.last_vad_score: float = 0.0
         self.vad_grace_until: float = 0.0
+        self.interrupted: bool = False
 
     def reset(self):
         self.state = "idle"
@@ -132,6 +145,7 @@ class UserCaptureState:
         self.last_speech_time = 0.0
         self.last_vad_score = 0.0
         self.vad_grace_until = 0.0
+        self.interrupted = False
 
 
 # ── Per-guild audio sink ──────────────────────────────────────────────────────
@@ -145,6 +159,7 @@ class BandiBotSink(voice_recv.AudioSink):
         self._active_uid: Optional[int] = None
         self._oww_buf: dict[int, np.ndarray] = {}
         self._score_buf: dict[int, deque] = {}
+        self._crypto_error_scheduled = False
 
     def wants_opus(self) -> bool:
         return False
@@ -168,16 +183,24 @@ class BandiBotSink(voice_recv.AudioSink):
             uid    = user.id
             u      = self._get_user(uid)
 
-            if u.state == "idle":
-                if self._active_uid is None:
-                    mono16 = _mono48k_to_16k(mono48)
-                    self._feed_wakeword(uid, mono16, user, u)
-            elif u.state == "listening":
+            if u.state in ("idle", "processing"):
+                mono16 = _mono48k_to_16k(mono48)
+                self._feed_wakeword(uid, mono16, user, u)
+            if u.state == "listening":
                 if uid == self._active_uid:
                     self._feed_vad(uid, mono48, u)
 
-        except Exception:
-            pass
+        except Exception as e:
+            err_str = str(e).lower()
+            logger.error(f"[voice] write error: {e}")
+            if not self._crypto_error_scheduled and (
+                "crypto" in err_str or "decrypt" in err_str or "cryptoerror" in err_str
+            ):
+                self._crypto_error_scheduled = True
+                logger.warning("[voice] crypto error detected — scheduling sink restart")
+                asyncio.run_coroutine_threadsafe(
+                    self.gs._restart_sink(), self.gs.loop
+                )
 
     def _feed_wakeword(self, uid: int, samples16k: np.ndarray, user: discord.User, u: UserCaptureState):
         if uid not in self._oww_buf:
@@ -202,11 +225,24 @@ class BandiBotSink(voice_recv.AudioSink):
                 elapsed = time.time() - self.gs._last_wake_word
                 if elapsed < WAKEWORD_COOLDOWN:
                     break
+
                 self.gs._last_wake_word = time.time()
-                # Clear buffers and reset model state after detection
                 self._oww_buf[uid]   = np.array([], dtype=np.int16)
                 self._score_buf[uid].clear()
                 self.gs._oww_model.reset()
+
+                # If someone else is currently active, interrupt them
+                prev_uid = self._active_uid
+                if prev_uid is not None and prev_uid != uid:
+                    prev_u = self._get_user(prev_uid)
+                    if prev_u.state not in ("idle",):
+                        prev_u.interrupted = True
+                        logger.info(f"[voice] ── interrupting uid={prev_uid} for new wake word ──")
+                        asyncio.run_coroutine_threadsafe(
+                            self.gs._interrupt_current(), self.gs.loop
+                        )
+                        prev_u.reset()
+
                 logger.info(f"[voice] ── wake word ({user.display_name}, hits={hits}/{SMOOTHING_WINDOW} avg={avg:.3f}) ──")
                 u.state = "waiting"
                 self._active_uid = uid
@@ -264,8 +300,8 @@ class BandiBotSink(voice_recv.AudioSink):
 
         logger.info(f"[voice] ← captured {duration:.2f}s | {u.total_speech_chunks} speech chunks | sending to STT")
         wav = _samples_to_wav_bytes(all_samples)
-        #with open("debug_capture.wav", "wb") as f:
-        #    f.write(wav)
+        with open("debug_capture.wav", "wb") as f:
+            f.write(wav)
         asyncio.run_coroutine_threadsafe(
             self.gs.on_speech_captured(uid, wav), self.gs.loop
         )
@@ -278,9 +314,7 @@ class BandiBotSink(voice_recv.AudioSink):
             self._active_uid = None
         self.gs._vad_model.reset_states()
         if was_state != "idle":
-            # Verify sink is still listening
-            vc = self.gs._voice_client
-            logger.info(f"[voice] → listening for wake word | sink_active={vc is not None and vc.is_connected()}")
+            logger.info(f"[voice] → listening for wake word | sink_active={self.gs._voice_client is not None and self.gs._voice_client.is_connected()}")
 
     def set_listening(self, uid: int):
         u   = self._get_user(uid)
@@ -295,6 +329,7 @@ class BandiBotSink(voice_recv.AudioSink):
         u.last_speech_time    = now
         u.last_vad_score      = 0.0
         u.vad_grace_until     = now + VAD_GRACE_PERIOD
+        u.interrupted         = False
         self.gs._vad_model.reset_states()
         logger.info(f"[vad]  → grace period {VAD_GRACE_PERIOD:.1f}s, then waiting for speech (timeout {SPEECH_START_TIMEOUT:.0f}s)")
 
@@ -316,18 +351,17 @@ class GuildVoiceSession:
         if not os.path.exists(WAKEWORD_MODEL_PATH):
             raise FileNotFoundError(f"Wake word model not found at {WAKEWORD_MODEL_PATH}")
 
-        # Load openWakeWord model using their full pipeline
         self._oww_model      = Model(wakeword_models=[WAKEWORD_MODEL_PATH])
         self._oww_model_name = list(self._oww_model.models.keys())[0]
-
-        # Silero VAD
-        self._vad_model = load_silero_vad()
+        self._vad_model      = load_silero_vad()
 
         self.sink: Optional[BandiBotSink] = None
         self._voice_client: Optional[voice_recv.VoiceRecvClient] = None
         self._last_activity: float = time.time()
         self._idle_task: Optional[asyncio.Task] = None
         self._last_wake_word: float = 0.0
+        self._pipeline_task: Optional[asyncio.Task] = None
+        self._monitor_task: Optional[asyncio.Task] = None
 
         logger.info(f"[voice] ready in {guild.name} | model: {self._oww_model_name}")
 
@@ -342,6 +376,36 @@ class GuildVoiceSession:
             )
         return self._sessions[user.id]
 
+    async def _interrupt_current(self):
+        """Cancel any in-progress TTS, monitor, and pipeline immediately."""
+        from tts import cancel_tts
+        cancel_tts(self._voice_client)
+        if self._monitor_task and not self._monitor_task.done():
+            self._monitor_task.cancel()
+            self._monitor_task = None
+        if self._pipeline_task and not self._pipeline_task.done():
+            self._pipeline_task.cancel()
+            self._pipeline_task = None
+        logger.info("[voice] ← interrupted current pipeline")
+
+    async def _restart_sink(self):
+        """Restart the audio receive sink after a crypto error."""
+        if not self._voice_client or not self._voice_client.is_connected():
+            return
+        logger.info("[voice] restarting sink after crypto error")
+        try:
+            self._voice_client.stop_listening()
+        except Exception:
+            pass
+        await asyncio.sleep(0.5)
+        self.sink = BandiBotSink(self)
+        self._oww_model.reset()
+        try:
+            self._voice_client.listen(self.sink)
+            logger.info("[voice] sink restarted → listening for wake word")
+        except Exception as e:
+            logger.error(f"[voice] sink restart failed: {e}")
+
     async def start(self, voice_channel: discord.VoiceChannel):
         self.sink = BandiBotSink(self)
         existing  = voice_channel.guild.voice_client
@@ -350,7 +414,7 @@ class GuildVoiceSession:
         else:
             self._voice_client = await voice_channel.connect(cls=voice_recv.VoiceRecvClient)
         await asyncio.sleep(1.0)
-        self._oww_model.reset()  # ← add this
+        self._oww_model.reset()
         self._voice_client.listen(self.sink)
         self._last_activity = time.time()
         self._idle_task = asyncio.create_task(self._idle_loop())
@@ -360,6 +424,12 @@ class GuildVoiceSession:
         if self._idle_task:
             self._idle_task.cancel()
             self._idle_task = None
+        if self._monitor_task:
+            self._monitor_task.cancel()
+            self._monitor_task = None
+        if self._pipeline_task:
+            self._pipeline_task.cancel()
+            self._pipeline_task = None
         if self._voice_client and self._voice_client.is_connected():
             self._voice_client.stop_listening()
             await self._voice_client.disconnect()
@@ -374,7 +444,6 @@ class GuildVoiceSession:
             while True:
                 await asyncio.sleep(60)
 
-                # Reset OWW model state every 10 minutes to prevent drift
                 if time.time() - last_reset > 600:
                     self._oww_model.reset()
                     last_reset = time.time()
@@ -393,24 +462,14 @@ class GuildVoiceSession:
             pass
 
     async def on_wake_word(self, user: discord.User):
-        from tts import play_activation
-        from music import voice_manager
+        from tts import play_activation, cancel_tts
         self.bump_activity()
-        player = voice_manager.get_player(self.guild)
-
-        if player.is_playing:
-            logger.info(f"[voice] → listening for command [{user.display_name}] (music playing)")
-            if hasattr(player.voice_client, 'source') and player.voice_client.source:
-                if hasattr(player.voice_client.source, 'volume'):
-                    player.voice_client.source.volume = 0.08
-        else:
-            logger.info(f"[voice] → listening for command [{user.display_name}]")
-            asyncio.create_task(play_activation(self._voice_client))
-
+        cancel_tts(self._voice_client)
+        logger.info(f"[voice] → listening for command [{user.display_name}]")
+        asyncio.create_task(play_activation(self._voice_client))
         if self.sink:
             self.sink.set_listening(user.id)
-
-        asyncio.create_task(self._speech_monitor(user.id, user.display_name))
+        self._monitor_task = asyncio.create_task(self._speech_monitor(user.id, user.display_name))
 
     async def _speech_monitor(self, uid: int, display_name: str):
         start = time.time()
@@ -424,6 +483,10 @@ class GuildVoiceSession:
                     return
 
                 u = self.sink._get_user(uid)
+
+                if u.interrupted:
+                    logger.info(f"[vad]  monitor exiting — interrupted")
+                    return
 
                 if u.state != "listening":
                     logger.info(f"[vad]  monitor exiting — state={u.state}")
@@ -446,7 +509,6 @@ class GuildVoiceSession:
                     if grace_elapsed >= SPEECH_START_TIMEOUT:
                         logger.info(f"[vad]  ✗ no speech in {grace_elapsed:.1f}s — resetting")
                         self.sink._reset_user(uid)
-                        await self._unduck()
                         return
                     continue
 
@@ -464,14 +526,6 @@ class GuildVoiceSession:
             pass
         except Exception as e:
             logger.error(f"[vad]  monitor error: {e}")
-    
-    async def _unduck(self):
-        from music import voice_manager
-        player = voice_manager.get_player(self.guild)
-        if player.is_connected:
-            if hasattr(player.voice_client, 'source') and player.voice_client.source:
-                if hasattr(player.voice_client.source, 'volume'):
-                    player.voice_client.source.volume = 0.30
 
     async def on_speech_captured(self, uid: int, wav_bytes: bytes):
         from stt import transcribe
@@ -484,37 +538,62 @@ class GuildVoiceSession:
                 self.sink._reset_user(uid)
             return
 
-        session = self.get_session(member)
-        try:
-            text = await transcribe(wav_bytes)
-            if not text or len(text.strip()) < 2:
-                logger.info("[voice] ✗ empty transcription — resetting")
-                if self.sink:
-                    self.sink._reset_user(uid)
+        if self.sink:
+            u = self.sink._get_user(uid)
+            if u.interrupted:
+                logger.info(f"[voice] ✗ pipeline cancelled before STT — user was interrupted")
+                u.reset()
                 return
 
-            logger.info(f"[llm]  → processing: {text!r}")
-            session.add("user", text)
-            t = time.perf_counter()
-            response_text = await handle_voice_command(
-                text=text, member=member, guild=self.guild,
-                client=self.client, history=session.get_history(),
-            )
-            elapsed = (time.perf_counter() - t) * 1000
+        session = self.get_session(member)
 
-            if response_text:
-                session.add("assistant", response_text)
-                logger.info(f"[llm]  ← {elapsed:.0f}ms | speaking response")
-                await speak(self._voice_client, response_text, guild=self.guild)
-            else:
-                logger.info(f"[llm]  ← {elapsed:.0f}ms | no TTS (music command)")
+        async def _pipeline():
+            try:
+                text = await transcribe(wav_bytes)
+                if not text or len(text.strip()) < 2:
+                    logger.info("[voice] ✗ empty transcription — resetting")
+                    if self.sink:
+                        self.sink._reset_user(uid)
+                    return
 
-        except Exception as e:
-            logger.error(f"[voice] pipeline error: {e}")
-        finally:
-            if self.sink:
-                self.sink._reset_user(uid)
-            await self._unduck()
+                if self.sink and self.sink._get_user(uid).interrupted:
+                    logger.info("[voice] ✗ interrupted after STT — dropping response")
+                    self.sink._get_user(uid).reset()
+                    return
+
+                logger.info(f"[llm]  → processing: {text!r}")
+                session.add("user", text)
+                t = time.perf_counter()
+                response_text = await handle_voice_command(
+                    text=text, member=member, guild=self.guild,
+                    client=self.client, history=session.get_history(),
+                )
+                elapsed = (time.perf_counter() - t) * 1000
+
+                if self.sink and self.sink._get_user(uid).interrupted:
+                    logger.info("[voice] ✗ interrupted after LLM — dropping TTS")
+                    self.sink._get_user(uid).reset()
+                    return
+
+                if response_text:
+                    session.add("assistant", response_text)
+                    logger.info(f"[llm]  ← {elapsed:.0f}ms | speaking response")
+                    await speak(self._voice_client, response_text, guild=self.guild)
+                else:
+                    logger.info(f"[llm]  ← {elapsed:.0f}ms | no TTS (music command)")
+
+            except asyncio.CancelledError:
+                logger.info("[voice] ✗ pipeline task cancelled")
+            except Exception as e:
+                logger.error(f"[voice] pipeline error: {e}")
+            finally:
+                if self.sink:
+                    u = self.sink._get_user(uid)
+                    if u.state not in ("listening", "waiting", "processing"):
+                        self.sink._reset_user(uid)
+                self._pipeline_task = None
+
+        self._pipeline_task = asyncio.create_task(_pipeline())
 
 
 # ── Module-level manager ──────────────────────────────────────────────────────

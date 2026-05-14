@@ -42,7 +42,9 @@ class _FakeMsgProxy:
     def __init__(self, guild: discord.Guild, member: discord.Member):
         self.guild = guild
         self.author = member
-        self.channel = None
+        from music import voice_manager
+        player = voice_manager.get_player(guild)
+        self.channel = player.text_channel  
 
 
 async def handle_voice_command(
@@ -67,7 +69,7 @@ async def handle_voice_command(
         {"role": "system", "content": context_info},
         {"role": "system", "content": (
             "You are in a voice channel. Keep responses to 1-2 sentences max. "
-            "No markdown. Spanish or English only. "
+            "No markdown and no emojies. Spanish or English only. "
             "The conversation history below is PAST CONTEXT ONLY. "
             "IGNORE previous music requests. Only act on the CURRENT COMMAND at the end."
         )},

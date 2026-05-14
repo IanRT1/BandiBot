@@ -53,6 +53,7 @@ async def on_voice_state_update(member, before, after):
     # When the BOT joins a voice channel — start listening automatically
     if member == client.user:
         if after.channel is not None and before.channel != after.channel:
+            await asyncio.sleep(1.0)
             loop = asyncio.get_event_loop()
             await voice_listener_manager.start_listening(
                 member.guild, after.channel, client, loop
@@ -85,7 +86,6 @@ async def on_voice_state_update(member, before, after):
                 player._now_playing_view.message = None
         await player.disconnect()
         await voice_listener_manager.stop_listening(guild)
-
 
 MAX_RETRIES = 10
 

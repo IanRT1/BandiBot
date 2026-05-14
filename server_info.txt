@@ -9,7 +9,7 @@ A lo largo de los años, el servidor ha sobrevivido varios eventos que marcaron 
 ## Eventos Históricos
 
 ### La Batalla de Bandía - 2022
-Uno de los enfrentamientos más recordados del servidor. Participaron **Poyo**, **DJ Bonk**, **Trabis**, **Ian** y **Tronky**, con participación mínima de algunos miembros del grupo de los **OGs**. Los detalles del enfrentamiento se han vuelto parte del folclore del servidor y rara vez se discuten abiertamente, pero se dice que todo inicio por **DJ Bonk** al incluir a **Tronky** (Miembro de los OGs) dentro de Bandia, en el que originalmente solo estaban **Poyo**, **DJ Bonk**, **Trabis** e **Ian**. La batalla se divide entre los que querien que Tronky sea parte de Bandia y los que no. Al final Tronky se quedó con Bandia, por ahora.... 
+Uno de los enfrentamientos más recordados del servidor. Participaron **Poyo**, **DJ Bonk**, **Trabis**, **Ian** y **Tronky**, con participación mínima de algunos miembros del grupo de los **OGs**. Los detalles del enfrentamiento se han vuelto parte del folclore del servidor y rara vez se discuten abiertamente, pero se dice que todo inicio por **DJ Bonk** al incluir a **Tronky** (Miembro de los OGs) dentro de Bandía, en el que originalmente solo estaban **Poyo**, **DJ Bonk**, **Trabis** e **Ian**. La batalla se divide entre los que querien que Tronky sea parte de Bandía y los que no. Al final Tronky se quedó con Bandía, por ahora.... 
 
 ### La Guerra Civil de los OGs - 2023
 Un conflicto interno entre los miembros fundadores y veteranos del servidor, conocidos como **los OGs**. Es uno de los capítulos más complejos en la historia del servidor. Lo que ocurrió exactamente queda entre los involucrados, y mencionarlo frente a un OG puede revivir viejas tensiones. Solo sabemos que **Dgat** tuvo un papel importante.  
@@ -29,4 +29,4 @@ Bandibot se actualizó completamente para mejorar la experiencia integrando el u
 - "OGs" se refiere a los miembros más antiguos y respetados
 - "Panas" es un subgrupo de amigos muy cercanos dentro del servidor
 - Tronky es figura recurrente en eventos importantes del servidor
-- El origen del nombre BandiBot viene de Bandia y Bot. Bandia siendo el grupo fundador del servidor en el que se encuentra Ian y Bot porque es un bot. 
+- El origen del nombre BandiBot viene de Bandía y Bot. Bandía siendo el grupo fundador del servidor en el que se encuentra Ian y Bot porque es un bot. 
