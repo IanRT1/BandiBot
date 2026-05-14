@@ -18,7 +18,16 @@ python-dotenv
 # =========================
 # Voice / Music
 # =========================
-PyNaCl      # voice encryption
-davey       # DAVE (Discord voice E2EE) support
-yt-dlp      # YouTube/streaming URL resolution
-pillow
+PyNaCl          # voice encryption
+davey           # DAVE (Discord voice E2EE) support
+yt-dlp          # YouTube/streaming URL resolution
+pillow          # banner image generation
+
+# =========================
+# Wake Word / VAD / STT
+# =========================
+numpy           # audio processing
+torch           # required by silero-vad
+silero-vad      # voice activity detection
+openwakeword    # wake word detection
+deepgram-sdk    # STT and TTS via Deepgram

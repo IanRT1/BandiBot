@@ -38,6 +38,33 @@ def _format_duration(seconds) -> str:
         return f"{hours}:{minutes:02d}:{secs:02d}"
     return f"{minutes}:{secs:02d}"
 
+def _estimate_width(text: str) -> float:
+    """Estimate rendered width of text using character-width approximations."""
+    narrow = set('iIl1|!.,;: ')
+    wide   = set('WMmwW@')
+    total  = 0.0
+    for ch in text:
+        if ch in narrow:
+            total += 0.5
+        elif ch in wide:
+            total += 1.3
+        else:
+            total += 1.0
+    return total
+
+NEXT_TRACK_MAX_WIDTH = 28.0  # tweak this to calibrate
+
+def _fit_next_track(title: str) -> str:
+    """Truncate title to fit within pixel-width budget, appending … if needed."""
+    if _estimate_width(title) <= NEXT_TRACK_MAX_WIDTH:
+        return title
+    truncated = ""
+    for ch in title:
+        candidate = truncated + ch
+        if _estimate_width(candidate + "…") > NEXT_TRACK_MAX_WIDTH:
+            return truncated + "…"
+        truncated = candidate
+    return truncated
 
 def _build_playing_embed(
     queue_size: int,
@@ -48,7 +75,7 @@ def _build_playing_embed(
     embed = discord.Embed(color=EMBED_COLOR)
     embed.set_author(name="✦  Now Playing")
     embed.set_image(url="attachment://now_playing.png")
-    next_line = f"\n⏭ Up next: {next_track[:27]}..." if next_track and len(next_track) > 30 else (f"\n⏭ Up next: {next_track}" if next_track else "")
+    next_line = f"\n⏭ Up next: {_fit_next_track(next_track)}" if next_track else ""
     embed.set_footer(
         text=f"⏱ {duration_str}                                 🎵 {queue_size} in queue{next_line}\n👤 Requested by {requested_by}"
     )

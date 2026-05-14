@@ -125,8 +125,7 @@ def build_instruction(bot_display_name, server_name):
 def _is_music_tool(name: str) -> bool:
     return name in {
         "play_music", "skip_track", "pause_music", "resume_music",
-        "stop_music", "leave_voice", "now_playing", "get_queue",
-        "move_track", "delete_track", 
+        "stop_music", "leave_voice", "move_track", "delete_track", 
     }
 
 

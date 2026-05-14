@@ -51,7 +51,7 @@ VOICE_ENABLED = True
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 WAKEWORD_MODEL_PATH   = os.path.join(os.path.dirname(__file__), "BandiBot.onnx")
-WAKEWORD_THRESHOLD    = 0.10
+WAKEWORD_THRESHOLD    = 0.01
 WAKEWORD_COOLDOWN     = 2
 HITS_REQUIRED         = 3
 SMOOTHING_WINDOW      = 5
