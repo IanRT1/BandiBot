@@ -19,7 +19,7 @@ out/
 
 # --- PYTHON ---
 
-**pycache**/
+__pycache__/
 *.py[cod]
 *.pyo
 *.pyd
@@ -28,6 +28,8 @@ out/
 .venv/
 venv/
 env/
+*.egg-info/
+.eggs/
 
 # --- OS FILES ---
 
@@ -50,6 +52,7 @@ logs/
 
 tmp/
 temp/
+debug_capture.wav
 
 # --- SECRETS / KEYS ---
 

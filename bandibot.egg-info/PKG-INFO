@@ -1,8 +1,0 @@
-Metadata-Version: 2.4
-Name: bandibot
-Version: 1.0.0
-Summary: A self-hosted Discord bot with continuous voice listening and music playback
-Author: IanRT1
-Requires-Python: >=3.11
-License-File: LICENSE
-Dynamic: license-file
