@@ -1,12 +1,37 @@
 """
-tts.py — Text-to-speech using Deepgram Aura-2 with PCM mixing.
+tts.py
 
-MixerSource holds the music stream and injects TTS on top.
-Music never pauses or restarts — both streams play simultaneously.
-TTS can be cancelled mid-stream via cancel_tts() for wake word interruptions.
+Text-to-speech and audio mixing for BandiBot using Deepgram Aura-2.
 
-Deepgram linear16 format: 48kHz, 16-bit signed, mono.
-Discord needs:            48kHz, 16-bit signed, stereo.
+Two playback modes depending on whether music is active:
+
+  Mixer mode (music playing):
+    TTS is streamed as PCM and injected directly into the MixerSource
+    audio stream. Music volume is ducked during speech. No pausing or
+    restarting — both streams play simultaneously.
+
+  Standalone mode (no music):
+    TTS is played via a dedicated _StandaloneSource fed into the Discord
+    voice client directly. Fully cancellable via threading.Event.
+
+Classes:
+  MixerSource      → wraps a primary audio source, injects TTS on top
+  _StandaloneSource → standalone cancellable TTS source for silence mode
+
+Key functions:
+  speak()           → route TTS to mixer or standalone based on state
+  cancel_tts()      → immediately cancel any in-progress TTS
+  play_activation() → play wake word confirmation sound
+
+Cancellation:
+  Wake word interruptions cancel TTS mid-stream. MixerSource clears its
+  buffer and sets a cancelled flag. _StandaloneSource uses threading.Event
+  so cancellation works safely across asyncio and audio threads.
+
+Audio format:
+  Deepgram output: 48kHz, 16-bit signed, mono (linear16)
+  Discord input:   48kHz, 16-bit signed, stereo
+  Conversion:      mono samples duplicated to both stereo channels
 """
 
 import asyncio
@@ -23,7 +48,7 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 DEEPGRAM_API_KEY   = os.getenv("DEEPGRAM_API_KEY")
-TTS_MODEL          = "aura-2-sirio-es"
+TTS_MODEL          = "aura-2-olivia-es"
 TTS_SAMPLE_RATE    = 48000
 DISCORD_FRAME_SIZE = 3840
 MUSIC_DUCK_VOLUME  = 0.3

@@ -1,6 +1,21 @@
 """
-stt.py — Speech-to-text using Deepgram Nova-3.
-Accepts WAV bytes, returns transcribed text string.
+stt.py
+
+Speech-to-text for BandiBot using Deepgram Nova-3.
+
+Accepts raw WAV bytes captured from the Discord voice pipeline and returns
+a transcribed text string. Configured for Spanish with smart formatting
+and punctuation enabled.
+
+Pipeline:
+  WAV bytes → Deepgram Nova-3 prerecorded API → transcript string
+
+The client is initialized once at module load using DEEPGRAM_API_KEY from
+the environment. All errors are caught and logged; an empty string is
+returned on failure so the voice pipeline can handle it gracefully.
+
+Language: Spanish (es) — matches the primary language of the server.
+Model: nova-3 — Deepgram's most accurate model as of 2026.
 """
 
 import logging

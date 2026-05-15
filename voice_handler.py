@@ -1,8 +1,31 @@
 """
 voice_handler.py
 
-Bridges the voice pipeline to the existing LLM + tool call logic.
-Uses the same instructions.txt as the text handler for consistency.
+Bridges the voice pipeline to the LLM and tool execution layer.
+
+Called by voice_listener.py after STT produces a transcript. Builds the
+LLM prompt with voice-specific constraints, executes any tool calls, and
+returns a plain text response string for TTS — or an empty string if the
+command was a music action that requires no spoken confirmation.
+
+Prompt design:
+  History is explicitly labeled [PAST] to prevent the LLM from re-executing
+  old music commands from earlier in the session. The current command is
+  separated by a visible divider so the model always acts on the right input.
+
+Response constraints:
+  1-2 sentences max, no markdown, no emojis, Spanish or English only.
+  These constraints are enforced via the system prompt since voice output
+  is fed directly to TTS with no post-processing.
+
+Music commands:
+  When a music tool is called, no TTS response is generated — the music
+  action itself is the feedback. An empty string is returned so the voice
+  pipeline knows to skip TTS entirely.
+
+_FakeMsgProxy:
+  A minimal stand-in for discord.Message that lets _execute_tool_call()
+  in handlers.py operate identically whether called from text or voice.
 """
 
 import logging

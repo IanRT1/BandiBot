@@ -1,3 +1,32 @@
+"""
+utils.py
+
+Shared utility functions for BandiBot.
+
+Provides helpers for time formatting, member data collection, and server
+presence aggregation used across handlers.py and voice_handler.py.
+
+Functions:
+  clean_username()        → strip decorative characters (e.g. ・) from display names
+  get_current_pst_time()  → current Pacific time formatted as hh:mm AM/PM
+  get_current_pst_date()  → current Pacific date formatted as Weekday, Month Day, Year
+  get_server_info()       → collect online members, activities, and voice channel state
+
+Privacy:
+  Voice channels listed in HIDDEN_VOICE_CHANNEL_IDS are excluded entirely
+  from get_server_info() output — neither their names nor their members
+  are ever sent to the LLM. The bot sees them via Discord's API but
+  filters them before any data leaves the system.
+
+Permission reporting:
+  Only a curated subset of permissions (ban_members, manage_channels,
+  manage_roles) are surfaced to the LLM to keep context concise and
+  avoid exposing the full 40+ Discord permission flag set.
+
+Timezone:
+  All time values use America/Los_Angeles (Pacific) regardless of where
+  the bot is hosted, since the server community is based there.
+"""
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 

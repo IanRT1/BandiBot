@@ -1,8 +1,29 @@
-"""Generate the Now Playing banner image.
+"""
+banner.py
 
-Builds a 1:1 square image with the YouTube thumbnail as background, dark
-overlay for readability, and song title + artist + BandiBot mark composited
-on top. Returns PNG bytes ready to attach to a Discord embed.
+Generates the Now Playing banner image for BandiBot.
+
+Builds a square PNG by fetching the YouTube thumbnail, applying a dark
+overlay for readability, and compositing the song title, artist name, and
+a BandiBot watermark on top. Returns raw PNG bytes ready to attach to a
+Discord embed as a file upload.
+
+Pipeline:
+  Fetch thumbnail URL → crop to square → gaussian blur → dark overlay
+  → draw title (word-wrapped, max 3 lines) → draw artist → draw watermark
+  → encode as PNG
+
+Fallback behavior:
+  If the thumbnail URL is unavailable or the fetch fails, a solid dark
+  purple background is used instead. Text rendering always proceeds
+  regardless of thumbnail availability.
+
+Font loading:
+  Tries common system font paths in order (Windows → macOS → Linux),
+  falling back to Pillow's built-in default if none are found.
+
+Output:
+  230×230 px PNG, optimized for Discord embed image display.
 """
 
 import io

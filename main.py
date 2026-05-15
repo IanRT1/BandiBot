@@ -1,3 +1,23 @@
+"""
+main.py
+
+Entry point for BandiBot — Discord voice and chat assistant.
+
+Manages the Discord client lifecycle, routes incoming messages and voice
+state changes to the appropriate handlers, and implements exponential
+backoff reconnection logic for network-level failures.
+
+Architecture overview:
+  Text commands  → handle_bot_mention (handlers.py)
+  Voice commands → voice_listener_manager (voice_listener.py)
+  Music playback → voice_manager (music.py)
+  TTS / mixing   → speak / MixerSource (tts.py)
+  STT            → transcribe (stt.py)
+
+The bot responds to @mentions in text channels and to a custom wake word
+in voice channels. Voice interactions run a full wake word → VAD → STT →
+LLM → TTS pipeline with interruption support and mid-speech cancellation.
+"""
 import logging
 import os
 import random

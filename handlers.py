@@ -1,3 +1,32 @@
+"""
+handlers.py
+
+Message handling and tool execution for BandiBot's text channel interactions.
+
+Processes @mention messages, builds LLM context, executes tool calls, and
+sends responses back to the Discord channel. Shared with the voice pipeline
+via _FakeMsgProxy so tool execution logic is never duplicated.
+
+Request flow:
+  @mention received → fetch channel history → build context → LLM call
+  → tool calls executed → follow-up LLM call → reply sent
+
+Tool execution:
+  All tool calls route through _execute_tool_call(), which is shared between
+  text commands (real discord.Message) and voice commands (_FakeMsgProxy).
+  Music tool responses use a stripped-down follow-up prompt for concise
+  confirmations. Non-music tools use the full conversation context.
+
+Context building:
+  - instructions.txt    → bot identity and behavior rules (loaded once)
+  - server_info.txt     → static server lore (loaded once, fetched on demand)
+  - channel history     → last 20 messages for conversational continuity
+  - member activity     → real-time presence fetched on demand via tool call
+  - server context      → name, owner, channel, time, current user
+
+Music tools bypass the full follow-up flow and use a minimal prompt
+to keep confirmations short and language-matched to the user.
+"""
 import asyncio
 import json
 import logging
@@ -125,9 +154,8 @@ def build_instruction(bot_display_name, server_name):
 def _is_music_tool(name: str) -> bool:
     return name in {
         "play_music", "skip_track", "pause_music", "resume_music",
-        "stop_music", "leave_voice", "move_track", "delete_track", 
+        "stop_music", "leave_voice", "move_track", "delete_track", "queue_bulk",
     }
-
 
 async def _execute_tool_call(tool_call, message):
     name = tool_call["name"]
@@ -178,6 +206,27 @@ async def _execute_tool_call(tool_call, message):
 
             return result
 
+        elif name == "queue_bulk":
+            queries = args.get("queries", [])
+            is_playlist = args.get("is_playlist", False)
+
+            if not queries:
+                return "No songs provided."
+
+            if is_playlist:
+                result = await voice_manager.queue_playlist(guild, requester, queries[0])
+            else:
+                result = await voice_manager.queue_bulk(guild, requester, queries)
+
+            player = voice_manager.get_player(guild)
+            if not player.text_channel and message.channel:
+                player.text_channel = message.channel
+
+            if message.channel:
+                from now_playing_view import update_now_playing_queue
+                await update_now_playing_queue(player, len(player.queue))
+
+            return result
         elif name == "skip_track":
             return await voice_manager.skip(guild)
         elif name == "pause_music":

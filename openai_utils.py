@@ -1,4 +1,27 @@
-"""Thin async wrapper around the OpenAI SDK for chat completions."""
+"""
+openai_utils.py
+
+Thin async wrapper around the OpenAI SDK for BandiBot's chat completions.
+
+Manages a single shared AsyncOpenAI client and exposes a unified
+send_to_openai() function that handles both plain text responses and
+tool call responses in a consistent dict-shaped format.
+
+Tool definitions:
+  MUSIC_TOOLS          → playback control (play, queue_bulk, skip, pause, etc.)
+  GET_MEMBER_ACTIVITY_TOOL → real-time server presence and voice channel info
+  GET_SERVER_INFO_TOOL → static server history and lore from server_info.txt
+  ALL_TOOLS            → combined list sent on every chat completion request
+
+Tool call response shape:
+  {"choices": [{"message": {"content": None, "tool_calls": [...]}}]}
+
+Text response shape:
+  {"choices": [{"message": {"content": "..."}}]}
+
+Model is configurable via OPENAI_MODEL env var, defaults to gpt-5.4-nano.
+All API errors are caught and logged; None is returned on failure.
+"""
 
 import json
 import logging
@@ -8,26 +31,22 @@ from openai import AsyncOpenAI, APIError, APIConnectionError, RateLimitError
 
 logger = logging.getLogger(__name__)
 
-# Single shared async client. Reads OPENAI_API_KEY from env automatically
-# (loaded by main.py via dotenv). Manages its own connection pool.
 _client = AsyncOpenAI()
 
-# Models — overridable via .env
 DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4-nano")
 
 
-# Music tool schemas
 MUSIC_TOOLS = [
     {
         "type": "function",
         "function": {
             "name": "play_music",
             "description": (
-                "Play a song or audio in the user's current voice channel. "
+                "Play a single song or audio in the user's current voice channel. "
                 "Pass the user's exact words as the query — do NOT interpret, translate, or try to guess the correct song title. "
                 "Accepts either a YouTube URL or a free-text search query. "
                 "If something is already playing, the new track is added to the queue. "
-                "Use this whenever the user asks to play, queue, or put on music."
+                "Use this whenever the user asks to play or queue a SINGLE song."
             ),
             "parameters": {
                 "type": "object",
@@ -38,6 +57,36 @@ MUSIC_TOOLS = [
                     }
                 },
                 "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "queue_bulk",
+            "description": (
+                "Queue multiple songs at once. Use this when the user asks to add several songs, "
+                "provides a list of songs, or pastes a YouTube playlist URL. "
+                "For text lists, each item becomes a separate search query. "
+                "For a YouTube playlist URL, pass it as the single item in the list."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "queries": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "List of search queries or URLs. Each item is a separate song. "
+                            "For a YouTube playlist, pass the playlist URL as the only item."
+                        ),
+                    },
+                    "is_playlist": {
+                        "type": "boolean",
+                        "description": "True if the input is a YouTube playlist URL, False for text search queries.",
+                    },
+                },
+                "required": ["queries", "is_playlist"],
             },
         },
     },
@@ -159,10 +208,8 @@ MUSIC_TOOLS = [
             "parameters": {"type": "object", "properties": {}},
         },
     },
-
 ]
 
-# Member activity tool — fetches real-time server presence on demand
 GET_MEMBER_ACTIVITY_TOOL = [
     {
         "type": "function",
@@ -180,7 +227,6 @@ GET_MEMBER_ACTIVITY_TOOL = [
     }
 ]
 
-# Server info tool — reads from server_info.txt on demand
 GET_SERVER_INFO_TOOL = [
     {
         "type": "function",
@@ -206,33 +252,11 @@ GET_SERVER_INFO_TOOL = [
     }
 ]
 
-# Combined tool list sent on every chat call
 ALL_TOOLS = MUSIC_TOOLS + GET_MEMBER_ACTIVITY_TOOL + GET_SERVER_INFO_TOOL
 
 
 async def send_to_openai(payload, tools=None):
-    """Send a chat completion request and return a dict-shaped response.
-
-    Accepts the payload shape handlers.py builds:
-        {"messages": [...], "temperature": 0.5}
-
-    If `tools` is provided, the LLM may return a tool-call instead of text.
-    The returned dict uses one of two shapes:
-
-      Text response:
-        {"choices": [{"message": {"content": "..."}}], "usage": {...}}
-
-      Tool-call response:
-        {"choices": [{"message": {
-            "content": None,
-            "tool_calls": [
-                {"id": "...", "name": "...", "arguments": {...}},
-                ...
-            ]
-        }}], "usage": {...}}
-
-    Returns None on failure.
-    """
+    """Send a chat completion request and return a dict-shaped response."""
     try:
         model = payload.get("model", DEFAULT_MODEL)
         messages = payload["messages"]
