@@ -1,0 +1,6 @@
+assets
+bot
+core
+data
+music
+voice

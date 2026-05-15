@@ -1,5 +1,5 @@
 """
-stt.py
+voice/stt.py
 
 Speech-to-text for BandiBot using Deepgram Nova-3.
 
@@ -19,18 +19,15 @@ Model: nova-3 — Deepgram's most accurate model as of 2026.
 """
 
 import logging
-import os
 import time
 
 from deepgram import DeepgramClient, PrerecordedOptions
 
+from core.config import DEEPGRAM_API_KEY
+
 logger = logging.getLogger(__name__)
 
-_DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
-if not _DEEPGRAM_API_KEY:
-    raise RuntimeError("DEEPGRAM_API_KEY is not set in .env")
-
-_client = DeepgramClient(_DEEPGRAM_API_KEY)
+_client = DeepgramClient(DEEPGRAM_API_KEY)
 
 _OPTIONS = PrerecordedOptions(
     model="nova-3",

@@ -1,5 +1,5 @@
 """
-tts.py
+voice/tts.py
 
 Text-to-speech and audio mixing for BandiBot using Deepgram Aura-2.
 
@@ -34,25 +34,22 @@ Audio format:
   Conversion:      mono samples duplicated to both stereo channels
 """
 
-import asyncio
-import logging
 import os
 import time
-import threading
-from typing import Optional
-
+import asyncio
+import logging
 import aiohttp
 import discord
+import threading
 import numpy as np
+from core.config import DEEPGRAM_API_KEY
 
 logger = logging.getLogger(__name__)
 
-DEEPGRAM_API_KEY   = os.getenv("DEEPGRAM_API_KEY")
 TTS_MODEL          = "aura-2-olivia-es"
 TTS_SAMPLE_RATE    = 48000
 DISCORD_FRAME_SIZE = 3840
 MUSIC_DUCK_VOLUME  = 0.3
-
 
 class MixerSource(discord.AudioSource):
     """
@@ -376,7 +373,7 @@ async def play_activation(voice_client: discord.VoiceClient):
     """Play wake activation sound. Mixes with music if playing."""
     if not voice_client or not voice_client.is_connected():
         return
-    wav_path = os.path.join(os.path.dirname(__file__), "wake_activation.wav")
+    wav_path = os.path.join(os.path.dirname(__file__), "..", "assets", "wake_activation.wav")
     if not os.path.exists(wav_path):
         logger.warning("[tts]  ✗ wake_activation.wav not found")
         return

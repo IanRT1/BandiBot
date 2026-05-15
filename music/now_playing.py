@@ -1,5 +1,5 @@
 """
-now_playing_view.py
+music/now_playing.py
 
 Now Playing embed + interactive button controls for BandiBot.
 
@@ -31,8 +31,8 @@ from typing import Optional
 
 import discord
 
-from banner import generate_banner
-from music import voice_manager
+from music.banner import generate_banner
+from music.player import voice_manager
 
 logger = logging.getLogger(__name__)
 

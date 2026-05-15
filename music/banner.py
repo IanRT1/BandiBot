@@ -1,5 +1,5 @@
 """
-banner.py
+music/banner.py
 
 Generates the Now Playing banner image for BandiBot.
 

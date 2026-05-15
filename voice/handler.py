@@ -1,5 +1,5 @@
 """
-voice_handler.py
+voice/handler.py
 
 Bridges the voice pipeline to the LLM and tool execution layer.
 
@@ -34,9 +34,9 @@ import time
 
 import discord
 
-from utils import clean_username, get_current_pst_time, get_current_pst_date
-from openai_utils import send_to_openai, ALL_TOOLS
-from handlers import (
+from bot.utils import clean_username, get_current_pst_time, get_current_pst_date
+from bot.openai_client import send_to_openai, ALL_TOOLS
+from bot.handlers import (
     build_instruction,
     _execute_tool_call,
     _is_music_tool,
@@ -65,7 +65,7 @@ class _FakeMsgProxy:
     def __init__(self, guild: discord.Guild, member: discord.Member):
         self.guild = guild
         self.author = member
-        from music import voice_manager
+        from music.player import voice_manager
         player = voice_manager.get_player(guild)
         self.channel = player.text_channel  
 

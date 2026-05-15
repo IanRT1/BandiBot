@@ -1,5 +1,5 @@
 """
-music.py
+music/player.py
 
 Voice + music playback for BandiBot.
 
@@ -253,7 +253,7 @@ class GuildPlayer:
 
     def _play_resolved(self, track: "Track"):
         """Actually start playing a resolved track."""
-        from tts import MixerSource
+        from voice.tts import MixerSource
 
         if not self.is_connected:
             return
@@ -632,7 +632,7 @@ async def _post_now_playing_for_track(player, track):
     """Post a now playing banner for a track when none exists yet."""
     if not player.text_channel:
         return
-    from now_playing_view import post_now_playing
+    from music.now_playing import post_now_playing
     await post_now_playing(
         player.text_channel,
         player,

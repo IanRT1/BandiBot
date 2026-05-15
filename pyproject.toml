@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bandibot"
+version = "1.0.0"
+description = "A self-hosted Discord bot with continuous voice listening and music playback"
+authors = [{name = "IanRT1"}]
+requires-python = ">=3.11"
+
+[project.scripts]
+bandibot = "core.client:main"
+
+[tool.setuptools.packages.find]
+where = ["."]

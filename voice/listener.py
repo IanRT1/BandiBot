@@ -1,5 +1,5 @@
 """
-voice_listener.py
+voice/listener.py
 
 Handles per-guild voice channel listening for BandiBot.
 
@@ -50,8 +50,8 @@ VOICE_ENABLED = True
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-WAKEWORD_MODEL_PATH   = os.path.join(os.path.dirname(__file__), "BandiBot.onnx")
-WAKEWORD_THRESHOLD    = 0.01
+WAKEWORD_MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "assets", "BandiBot.onnx")
+WAKEWORD_THRESHOLD    = 0.02
 WAKEWORD_COOLDOWN     = 2
 HITS_REQUIRED         = 2
 SMOOTHING_WINDOW      = 3
@@ -379,7 +379,7 @@ class GuildVoiceSession:
 
     async def _interrupt_current(self):
         """Cancel any in-progress TTS immediately."""
-        from tts import cancel_tts
+        from voice.tts import cancel_tts
         cancel_tts(self._voice_client)
         if self._monitor_task and not self._monitor_task.done():
             self._monitor_task.cancel()
@@ -441,7 +441,7 @@ class GuildVoiceSession:
         logger.info(f"[voice] disconnected from {self.guild.name}")
 
     async def _idle_loop(self):
-        from music import voice_manager
+        from music.player import voice_manager
         last_reset = time.time()
         try:
             while True:
@@ -465,7 +465,7 @@ class GuildVoiceSession:
             pass
 
     async def on_wake_word(self, user: discord.User):
-        from tts import play_activation, cancel_tts
+        from voice.tts import play_activation, cancel_tts
         self.bump_activity()
         cancel_tts(self._voice_client)
         logger.info(f"[voice] → listening for command [{user.display_name}]")
@@ -531,9 +531,9 @@ class GuildVoiceSession:
             logger.error(f"[vad]  monitor error: {e}")
 
     async def on_speech_captured(self, uid: int, wav_bytes: bytes):
-        from stt import transcribe
-        from tts import speak
-        from voice_handler import handle_voice_command
+        from voice.stt import transcribe
+        from voice.tts import speak, play_activation, cancel_tts, MixerSource
+        from voice.handler import handle_voice_command
 
         member = self.guild.get_member(uid)
         if not member:

@@ -61,22 +61,22 @@ Every instance is independently hosted by the user. There is no central server, 
 Discord Gateway
       │
       ├── on_message (@mention)
-      │         └── handlers.py
-      │                   ├── LLM (openai_utils.py)
+      │         └── bot/handlers.py
+      │                   ├── LLM (bot/openai_client.py)
       │                   └── Tool execution (_execute_tool_call)
-      │                             ├── music.py (VoiceManager)
-      │                             ├── voice_listener.py
-      │                             └── handlers.py (server info, member activity)
+      │                             ├── music/player.py (VoiceManager)
+      │                             ├── voice/listener.py
+      │                             └── bot/handlers.py (server info, member activity)
       │
       └── on_voice_state_update
-                └── voice_listener.py (GuildVoiceSession)
+                └── voice/listener.py (GuildVoiceSession)
                           ├── BandiBotSink (audio receive)
                           │         ├── Wake word detection (openWakeWord)
                           │         └── VAD (Silero)
-                          ├── stt.py (Deepgram Nova-3)
-                          ├── voice_handler.py (LLM + tool calls)
-                          └── tts.py (Deepgram Aura-2 → MixerSource)
-                                    └── music.py (FFmpeg → MixerSource → Discord)
+                          ├── voice/stt.py (Deepgram Nova-3)
+                          ├── voice/handler.py (LLM + tool calls)
+                          └── voice/tts.py (Deepgram Aura-2 → MixerSource)
+                                    └── music/player.py (FFmpeg → MixerSource → Discord)
 ```
 
 ### Key Design Decisions
@@ -151,7 +151,13 @@ cd BandiBot
 pip install -r requirements.txt
 ```
 
-**3. Create your `.env` file**
+**3. Install the package**
+
+```bash
+pip install -e .
+```
+
+**4. Create your `.env` file**
 
 ```bash
 cp .env.example .env
@@ -159,7 +165,7 @@ cp .env.example .env
 
 Edit `.env` with your API keys (see [Configuration](#configuration)).
 
-**4. Create a Discord bot**
+**5. Create a Discord bot**
 
 - Go to the [Discord Developer Portal](https://discord.com/developers/applications)
 - Create a new application and add a Bot
@@ -170,14 +176,14 @@ Edit `.env` with your API keys (see [Configuration](#configuration)).
 - Copy the bot token into your `.env`
 - Invite the bot to your server with the `bot` and `applications.commands` scopes and `Administrator` permissions
 
-**5. Place your wake word model**
+**6. Place your wake word model**
 
-Put your `BandiBot.onnx` wake word model file in the root project directory. See [Wake Word Setup](#wake-word-setup) for how to train one.
+Put your `BandiBot.onnx` wake word model file in the `assets/` directory. See [Wake Word Setup](#wake-word-setup) for how to train one.
 
-**6. Run the bot**
+**7. Run the bot**
 
 ```bash
-python main.py
+bandibot
 ```
 
 ---
@@ -196,7 +202,7 @@ DEEPGRAM_API_KEY=your_deepgram_api_key
 
 ## Wake Word Setup
 
-BandiBot uses a custom [openWakeWord](https://github.com/dscripka/openWakeWord) ONNX model for wake word detection. The model file must be named `BandiBot.onnx` and placed in the root project directory.
+BandiBot uses a custom [openWakeWord](https://github.com/dscripka/openWakeWord) ONNX model for wake word detection. The model file must be named `BandiBot.onnx` and placed in the `assets/` directory.
 
 ### Training a Custom Model
 
@@ -214,7 +220,7 @@ Use the included `openwakeword_test.py` to test detection sensitivity before dep
 python openwakeword_test.py
 ```
 
-Adjust the following constants in `voice_listener.py` to tune detection:
+Adjust the following constants in `voice/listener.py` to tune detection:
 
 | Constant | Default | Description |
 |---|---|---|
@@ -225,7 +231,7 @@ Adjust the following constants in `voice_listener.py` to tune detection:
 
 ### Notes on Discord Audio
 
-Discord's Opus codec introduces audio degradation compared to a direct microphone signal. Models trained on clean microphone audio will score lower on Discord-processed audio. For best results, record training samples through Discord itself using the `debug_capture.wav` output (enable in `voice_listener.py`) and include those in your training set.
+Discord's Opus codec introduces audio degradation compared to a direct microphone signal. Models trained on clean microphone audio will score lower on Discord-processed audio. For best results, record training samples through Discord itself using the `debug_capture.wav` output (enable in `voice/listener.py`) and include those in your training set.
 
 ---
 
@@ -233,23 +239,43 @@ Discord's Opus codec introduces audio degradation compared to a direct microphon
 
 ```
 BandiBot/
-├── main.py               # Entry point, Discord client, event routing
-├── handlers.py           # Text command handling, LLM context, tool execution
-├── voice_handler.py      # Voice command LLM bridge, _FakeMsgProxy
-├── voice_listener.py     # Wake word, VAD, STT, TTS pipeline per guild
-├── music.py              # Music queue, yt-dlp resolution, FFmpeg playback
-├── now_playing_view.py   # Now Playing embed, button controls, live timer
-├── banner.py             # Banner image generation (thumbnail + text overlay)
-├── tts.py                # Deepgram TTS, MixerSource, audio mixing
-├── stt.py                # Deepgram STT wrapper
-├── openai_utils.py       # OpenAI SDK wrapper, tool definitions
-├── utils.py              # Shared utilities, member presence, time formatting
-├── instructions.txt      # Bot identity and behavior prompt (editable)
-├── server_info.txt       # Server history and lore (editable)
-├── BandiBot.onnx         # Wake word model (not included, train your own)
-├── wake_activation.wav   # Wake word confirmation sound
-├── requirements.txt      # Python dependencies
-└── .env                  # API keys (not committed)
+├── core/
+│   ├── client.py           # Discord client, event routing, reconnection logic
+│   └── config.py           # Centralized environment variable loading
+│
+├── voice/
+│   ├── listener.py         # Wake word, VAD, STT, TTS pipeline per guild
+│   ├── handler.py          # Voice command LLM bridge, _FakeMsgProxy
+│   ├── stt.py              # Deepgram STT wrapper
+│   └── tts.py              # Deepgram TTS, MixerSource, audio mixing
+│
+├── music/
+│   ├── player.py           # Music queue, yt-dlp resolution, FFmpeg playback
+│   ├── now_playing.py      # Now Playing embed, button controls, live timer
+│   └── banner.py           # Banner image generation (thumbnail + text overlay)
+│
+├── bot/
+│   ├── handlers.py         # Text command handling, LLM context, tool execution
+│   ├── openai_client.py    # OpenAI SDK wrapper, tool definitions
+│   └── utils.py            # Shared utilities, member presence, time formatting
+│
+├── assets/
+│   ├── BandiBot.onnx       # Wake word model (not included, train your own)
+│   └── wake_activation.wav # Wake word confirmation sound
+│
+├── data/
+│   ├── instructions.txt    # Bot identity and behavior prompt (editable)
+│   └── server_info.txt     # Server history and lore (editable)
+│
+├── __main__.py             # Package entry point
+├── openwakeword_test.py    # Wake word model tester
+├── pyproject.toml          # Package config, bandibot CLI entry point
+├── requirements.txt        # Python dependencies
+├── .env.example            # Environment variable template
+├── .env                    # API keys (not committed)
+├── .gitignore
+├── LICENSE
+└── README.md
 ```
 
 ---
@@ -258,31 +284,34 @@ BandiBot/
 
 ### Bot Personality
 
-Edit `instructions.txt` to change the bot's identity, language rules, tone, and behavior. The file is a plain text prompt loaded at startup. Variables `{bot_display_name}` and `{server_name}` are injected automatically.
+Edit `data/instructions.txt` to change the bot's identity, language rules, tone, and behavior. The file is a plain text prompt loaded at startup. Variables `{bot_display_name}` and `{server_name}` are injected automatically.
 
 ### Server Lore
 
-Edit `server_info.txt` to add your server's history, rules, events, member nicknames, and any other context you want the bot to know. This file is fetched on demand via the `get_server_info` tool when users ask server-specific questions.
+Edit `data/server_info.txt` to add your server's history, rules, events, member nicknames, and any other context you want the bot to know. This file is fetched on demand via the `get_server_info` tool when users ask server-specific questions.
 
 ### Wake Word
 
-Replace `BandiBot.onnx` with any openWakeWord-compatible ONNX model. Update `WAKEWORD_MODEL_PATH` in `voice_listener.py` if you rename the file.
+Replace `assets/BandiBot.onnx` with any openWakeWord-compatible ONNX model. Update `WAKEWORD_MODEL_PATH` in `voice/listener.py` if you rename the file.
 
 ### TTS Voice
 
-Change `TTS_MODEL` in `tts.py` to any [Deepgram Aura-2 voice](https://developers.deepgram.com/docs/tts-models). Default is `aura-2-javier-es` (Spanish male).
+Change `TTS_MODEL` in `voice/tts.py` to any [Deepgram Aura-2 voice](https://developers.deepgram.com/docs/tts-models). Default is `aura-2-javier-es` (Spanish male).
 
 ### STT Language
 
-Change the `language` field in `stt.py` `_OPTIONS` to any [Deepgram-supported language code](https://developers.deepgram.com/docs/languages).
+Change the `language` field in `voice/stt.py` `_OPTIONS` to any [Deepgram-supported language code](https://developers.deepgram.com/docs/languages).
 
 ### Music Volume
 
-Adjust `DEFAULT_VOLUME` in `music.py` (0.0–1.0) and `MUSIC_DUCK_VOLUME` in `tts.py` (volume multiplier applied to music while TTS is speaking).
+Adjust `DEFAULT_VOLUME` in `music/player.py` (0.0–1.0) and `MUSIC_DUCK_VOLUME` in `voice/tts.py` (volume multiplier applied to music while TTS is speaking).
 
 ### Hidden Voice Channels
 
-Add voice channel IDs to `HIDDEN_VOICE_CHANNEL_IDS` in `utils.py` to prevent those channels and their members from ever being reported to the LLM.
+Add voice channel IDs to `HIDDEN_VOICE_CHANNEL_IDS` in `bot/utils.py` to prevent those channels and their members from ever being reported to the LLM.
 
 ---
 
+## License
+
+MIT License — see [LICENSE](LICENSE) for details.
