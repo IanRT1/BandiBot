@@ -24,17 +24,17 @@ MUSIC_TOOLS = [
             "name": "play_music",
             "description": (
                 "Play a song or audio in the user's current voice channel. "
-                "Accepts either a YouTube URL or a free-text search query "
-                "(e.g. 'Pink Floyd Time'). If something is already playing, "
-                "the new track is added to the queue. Use this whenever the "
-                "user asks to play, queue, or put on music."
+                "Pass the user's exact words as the query — do NOT interpret, translate, or try to guess the correct song title. "
+                "Accepts either a YouTube URL or a free-text search query. "
+                "If something is already playing, the new track is added to the queue. "
+                "Use this whenever the user asks to play, queue, or put on music."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "URL or search query for the track to play.",
+                        "description": "The user's exact words as the search query. Do not interpret or modify.",
                     }
                 },
                 "required": ["query"],

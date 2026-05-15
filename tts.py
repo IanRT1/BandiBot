@@ -23,7 +23,7 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 DEEPGRAM_API_KEY   = os.getenv("DEEPGRAM_API_KEY")
-TTS_MODEL          = "aura-2-javier-es"
+TTS_MODEL          = "aura-2-sirio-es"
 TTS_SAMPLE_RATE    = 48000
 DISCORD_FRAME_SIZE = 3840
 MUSIC_DUCK_VOLUME  = 0.3

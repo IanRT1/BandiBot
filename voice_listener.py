@@ -53,8 +53,8 @@ VOICE_ENABLED = True
 WAKEWORD_MODEL_PATH   = os.path.join(os.path.dirname(__file__), "BandiBot.onnx")
 WAKEWORD_THRESHOLD    = 0.01
 WAKEWORD_COOLDOWN     = 2
-HITS_REQUIRED         = 3
-SMOOTHING_WINDOW      = 5
+HITS_REQUIRED         = 2
+SMOOTHING_WINDOW      = 3
 
 SOURCE_SAMPLE_RATE    = 48000
 OWW_SAMPLE_RATE       = 16000
@@ -300,8 +300,8 @@ class BandiBotSink(voice_recv.AudioSink):
 
         logger.info(f"[voice] ← captured {duration:.2f}s | {u.total_speech_chunks} speech chunks | sending to STT")
         wav = _samples_to_wav_bytes(all_samples)
-        with open("debug_capture.wav", "wb") as f:
-            f.write(wav)
+        #with open("debug_capture.wav", "wb") as f:
+        #    f.write(wav)
         asyncio.run_coroutine_threadsafe(
             self.gs.on_speech_captured(uid, wav), self.gs.loop
         )
@@ -345,6 +345,7 @@ class GuildVoiceSession:
         self.guild  = guild
         self.client = client
         self.loop   = loop
+        self._pipeline_is_music = False
 
         self._sessions: dict[int, VoiceSession] = {}
 
@@ -377,15 +378,17 @@ class GuildVoiceSession:
         return self._sessions[user.id]
 
     async def _interrupt_current(self):
-        """Cancel any in-progress TTS, monitor, and pipeline immediately."""
+        """Cancel any in-progress TTS immediately."""
         from tts import cancel_tts
         cancel_tts(self._voice_client)
         if self._monitor_task and not self._monitor_task.done():
             self._monitor_task.cancel()
             self._monitor_task = None
-        if self._pipeline_task and not self._pipeline_task.done():
-            self._pipeline_task.cancel()
-            self._pipeline_task = None
+        if not self._pipeline_is_music:
+            if self._pipeline_task and not self._pipeline_task.done():
+                self._pipeline_task.cancel()
+                self._pipeline_task = None
+        self._pipeline_is_music = False
         logger.info("[voice] ← interrupted current pipeline")
 
     async def _restart_sink(self):
@@ -569,6 +572,7 @@ class GuildVoiceSession:
                     client=self.client, history=session.get_history(),
                 )
                 elapsed = (time.perf_counter() - t) * 1000
+                self._pipeline_is_music = not bool(response_text)
 
                 if self.sink and self.sink._get_user(uid).interrupted:
                     logger.info("[voice] ✗ interrupted after LLM — dropping TTS")

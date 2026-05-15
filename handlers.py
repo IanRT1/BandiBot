@@ -172,7 +172,9 @@ async def _execute_tool_call(tool_call, message):
                 if message.channel:
                     from now_playing_view import update_now_playing_queue
                     await update_now_playing_queue(player, len(player.queue))
-                    await message.channel.send(result)
+                    from voice_handler import _FakeMsgProxy
+                    if isinstance(message, _FakeMsgProxy):
+                        await message.channel.send(result)
 
             return result
 
@@ -185,6 +187,8 @@ async def _execute_tool_call(tool_call, message):
         elif name == "stop_music":
             return await voice_manager.stop(guild)
         elif name == "leave_voice":
+            from voice_listener import voice_listener_manager
+            await voice_listener_manager.stop_listening(guild)
             return await voice_manager.leave(guild)
         elif name == "now_playing":
             return await voice_manager.now_playing(guild)
@@ -326,7 +330,7 @@ async def handle_bot_mention(message, client):
                         "role": "system",
                         "content": (
                             f"You are {client.user.display_name}, a chill Discord bot. "
-                            f"Respond naturally in the same language as the user. "
+                            f"Respond in the same language the user wrote in. The user wrote: '{user_message}'. Match that language exactly. "
                             f"Keep it short — one or two sentences max. "
                             f"The tool result tells you exactly what happened — confirm it confidently, don't ask for clarification."
                         ),

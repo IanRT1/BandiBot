@@ -183,6 +183,7 @@ class GuildPlayer:
     def _schedule_idle_check(self):
         if self._idle_task:
             self._idle_task.cancel()
+        logger.info(f"[music] idle check scheduled in {_IDLE_TIMEOUT}s")
         self._idle_task = asyncio.create_task(self._idle_disconnect())
 
     async def _idle_disconnect(self):
