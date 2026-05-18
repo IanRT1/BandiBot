@@ -76,7 +76,7 @@ async def handle_voice_command(
     guild: discord.Guild,
     client: discord.Client,
     history: list,
-) -> str:
+) -> tuple[str, bool]:
     user_name = clean_username(getattr(member, 'nick', None), member.name)
     t_start = time.perf_counter()
 
@@ -91,14 +91,14 @@ async def handle_voice_command(
         {"role": "system", "content": instruction},
         {"role": "system", "content": context_info},
         {"role": "system", "content": (
-            "You are in a voice channel. Keep responses to 1-2 sentences max. "
+            "You are in a voice channel. Keep responses brief and to the point "
             "No markdown and no emojies. Spanish or English only. "
             "The conversation history below is PAST CONTEXT ONLY. "
             "IGNORE previous music requests. Only act on the CURRENT COMMAND at the end."
+            "If the user asks you to leave, craft a goodbye message before leaving according to the context and history of conversation."
         )},
     ]
 
-    # Add history with explicit past labels
     for msg in history[:-1]:
         content = msg["content"]
         if msg["role"] == "user":
@@ -106,7 +106,6 @@ async def handle_voice_command(
         else:
             messages.append({"role": "assistant", "content": f"[PAST] {content}"})
 
-    # Current command — explicitly separated
     messages.append({"role": "system", "content": "━━━ CURRENT COMMAND BELOW — ACT ON THIS ONLY ━━━"})
     messages.append({"role": "user", "content": f"[{user_name}] {text}"})
 
@@ -116,14 +115,17 @@ async def handle_voice_command(
     )
 
     if not response_data:
-        return "Lo siento, algo salió mal."
+        return "Lo siento, algo salió mal.", False
 
     msg = response_data["choices"][0]["message"]
     tool_calls = msg.get("tool_calls")
 
+    should_leave = False
+
     if tool_calls:
         proxy = _FakeMsgProxy(guild, member)
         called_music = any(_is_music_tool(tc["name"]) for tc in tool_calls)
+        should_leave = any(tc["name"] == "leave_voice" for tc in tool_calls)
 
         messages.append({
             "role": "assistant",
@@ -153,19 +155,19 @@ async def handle_voice_command(
             elapsed = (time.perf_counter() - t_start) * 1000
             tool_names = [tc["name"] for tc in tool_calls]
             logger.info(f"[llm]  ← {', '.join(tool_names)} ({elapsed:.0f}ms) | no TTS")
-            return ""
+            return "", False
 
         response_data = await send_to_openai(
             {"messages": messages, "temperature": 0.5},
         )
 
         if not response_data:
-            return "Listo."
+            return "Listo.", should_leave
 
     raw = response_data["choices"][0]["message"].get("content", "")
     response_text = raw.strip() if raw else "Listo."
 
     elapsed = (time.perf_counter() - t_start) * 1000
-    logger.info(f"[llm]  ← {elapsed:.0f}ms | {response_text[:60]!r}")
+    logger.info(f"[llm]  ← {elapsed:.0f}ms | speaking ({len(response_text)} chars): {response_text!r}")
 
-    return response_text
+    return response_text, should_leave

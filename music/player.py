@@ -79,6 +79,7 @@ class Track:
     webpage_url: str
     duration: Optional[int] = None
     thumbnail: Optional[str] = None
+    thumbnail_bytes: Optional[bytes] = None
     artist: Optional[str] = None
     started_at: float = field(default_factory=time.time)
     paused_at: Optional[float] = None
@@ -629,7 +630,6 @@ def _extract_playlist(url: str, requested_by: str) -> list[Track]:
     return tracks
 
 async def _post_now_playing_for_track(player, track):
-    """Post a now playing banner for a track when none exists yet."""
     if not player.text_channel:
         return
     from music.now_playing import post_now_playing
@@ -642,6 +642,7 @@ async def _post_now_playing_for_track(player, track):
         queue_size=len(player.queue),
         requested_by=track.requested_by,
         thumbnail_url=track.thumbnail,
+        thumbnail_bytes=track.thumbnail_bytes,
     )
 
 

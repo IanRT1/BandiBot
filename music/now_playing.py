@@ -180,7 +180,9 @@ class NowPlayingView(discord.ui.View):
         self.pause_resume_button.emoji = discord.PartialEmoji.from_str("<:pause:1501401053277454416>")
 
         try:
-            png_bytes = await generate_banner(track.title, track.artist, track.thumbnail)
+            png_bytes = await generate_banner(
+                track.title, track.artist, track.thumbnail, track.thumbnail_bytes
+            )
         except Exception as e:
             logger.error(f"[now_playing] banner regen failed: {e}")
             return
@@ -317,9 +319,10 @@ async def post_now_playing(
     queue_size: int,
     requested_by: str,
     thumbnail_url: Optional[str] = None,
+    thumbnail_bytes: Optional[bytes] = None, 
 ) -> Optional["NowPlayingView"]:
     try:
-        png_bytes = await generate_banner(title, artist, thumbnail_url)
+        png_bytes = await generate_banner(title, artist, thumbnail_url, thumbnail_bytes)  # ← pass through
     except Exception as e:
         logger.error(f"[now_playing] banner generation failed: {e}")
         return None

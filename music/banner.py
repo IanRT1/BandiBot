@@ -121,13 +121,15 @@ def _crop_to_square(img: Image.Image) -> Image.Image:
 async def generate_banner(
     title: str,
     artist: Optional[str],
-    thumbnail_url: Optional[str],
+    thumbnail_url: Optional[str] = None,
+    thumbnail_bytes: Optional[bytes] = None,
 ) -> bytes:
-    """Generate a square Now Playing banner. Returns PNG bytes.
-
-    Falls back to a solid-color background if the thumbnail can't be fetched.
-    """
-    if thumbnail_url:
+    if thumbnail_bytes:
+        try:
+            bg = Image.open(io.BytesIO(thumbnail_bytes)).convert("RGB")
+        except Exception:
+            bg = None
+    elif thumbnail_url:
         bg = await _fetch_thumbnail(thumbnail_url)
     else:
         bg = None

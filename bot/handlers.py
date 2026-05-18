@@ -8,7 +8,9 @@ sends responses back to the Discord channel. Shared with the voice pipeline
 via _FakeMsgProxy so tool execution logic is never duplicated.
 
 Request flow:
-  @mention received → fetch channel history → build context → LLM call
+  @mention received → check for audio attachments (mp3/wav/flac/opus)
+  → if found: extract metadata + cover art, queue directly, skip LLM entirely
+  → if not: fetch channel history → build context → LLM call
   → tool calls executed → follow-up LLM call → reply sent
 
 Tool execution:
@@ -28,15 +30,24 @@ Music tools bypass the full follow-up flow and use a minimal prompt
 to keep confirmations short and language-matched to the user.
 """
 import asyncio
+import base64
+import io
 import json
 import logging
 import os
 import re
+import struct
 import time
 from textwrap import dedent
 from zoneinfo import ZoneInfo
 
+import aiohttp
 import discord
+from mutagen.flac import FLAC
+from mutagen.mp3 import MP3
+from mutagen.id3 import ID3
+from mutagen.mp4 import MP4
+from mutagen.oggvorbis import OggVorbis
 
 from bot.utils import (
     clean_username,
@@ -45,7 +56,7 @@ from bot.utils import (
     get_server_info,
 )
 from bot.openai_client import send_to_openai, ALL_TOOLS
-from music.player import voice_manager
+from music.player import voice_manager, Track
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +73,9 @@ if os.path.exists("data/server_info.txt"):
     logger.info(f"Loaded server_info.txt ({len(_SERVER_LORE)} chars)")
 
 _PACIFIC = ZoneInfo("America/Los_Angeles")
+
+# Audio file extensions treated as direct playback attachments
+_AUDIO_EXTENSIONS = {".mp3", ".wav", ".flac", ".opus", ".ogg", ".m4a", ".aac"}
 
 
 def _strip_bot_mentions(message, client):
@@ -154,8 +168,184 @@ def build_instruction(bot_display_name, server_name):
 def _is_music_tool(name: str) -> bool:
     return name in {
         "play_music", "skip_track", "pause_music", "resume_music",
-        "stop_music", "leave_voice", "move_track", "delete_track", "queue_bulk",
+        "stop_music", "move_track", "delete_track", "queue_bulk",
     }
+
+
+def _get_audio_attachments(message: discord.Message) -> list[discord.Attachment]:
+    """Return attachments whose extension is in _AUDIO_EXTENSIONS."""
+    result = []
+    for attachment in message.attachments:
+        ext = os.path.splitext(attachment.filename)[1].lower()
+        if ext in _AUDIO_EXTENSIONS:
+            result.append(attachment)
+    return result
+
+
+async def _extract_audio_metadata(url: str, ext: str) -> dict:
+    """Download attachment bytes and extract title, artist, duration, cover art via mutagen."""
+    result = {
+        "title": None,
+        "artist": None,
+        "duration": None,
+        "thumbnail_bytes": None,
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                if resp.status != 200:
+                    logger.warning(f"[music] metadata fetch returned {resp.status}")
+                    return result
+                data = await resp.read()
+
+        buf = io.BytesIO(data)
+
+        if ext == ".flac":
+            f = FLAC(buf)
+            result["title"] = f.get("title", [None])[0]
+            result["artist"] = f.get("artist", [None])[0] or f.get("performer", [None])[0]
+            result["duration"] = int(f.info.length) if f.info else None
+            if f.pictures:
+                result["thumbnail_bytes"] = f.pictures[0].data
+
+        elif ext == ".mp3":
+            buf.seek(0)
+            f = MP3(buf)
+            result["duration"] = int(f.info.length) if f.info else None
+            try:
+                buf.seek(0)
+                tags = ID3(buf)
+                tit2 = tags.get("TIT2")
+                tpe1 = tags.get("TPE1")
+                result["title"] = str(tit2) if tit2 else None
+                result["artist"] = str(tpe1) if tpe1 else None
+                apic = tags.getall("APIC")
+                if apic:
+                    result["thumbnail_bytes"] = apic[0].data
+            except Exception:
+                pass
+
+        elif ext in (".m4a", ".aac"):
+            buf.seek(0)
+            f = MP4(buf)
+            result["duration"] = int(f.info.length) if f.info else None
+            tags = f.tags or {}
+            title = tags.get("\xa9nam")
+            artist = tags.get("\xa9ART")
+            result["title"] = title[0] if title else None
+            result["artist"] = artist[0] if artist else None
+            covr = tags.get("covr")
+            if covr:
+                result["thumbnail_bytes"] = bytes(covr[0])
+
+        elif ext in (".ogg", ".opus"):
+            buf.seek(0)
+            f = OggVorbis(buf)
+            result["title"] = f.get("title", [None])[0]
+            result["artist"] = f.get("artist", [None])[0]
+            result["duration"] = int(f.info.length) if f.info else None
+            # Cover art in Ogg is stored as a base64-encoded FLAC PICTURE block
+            pic_b64 = f.get("metadata_block_picture", [None])[0]
+            if pic_b64:
+                try:
+                    pic_data = base64.b64decode(pic_b64)
+                    offset = 4  # skip picture type int
+                    mime_len = struct.unpack(">I", pic_data[offset:offset + 4])[0]
+                    offset += 4 + mime_len
+                    desc_len = struct.unpack(">I", pic_data[offset:offset + 4])[0]
+                    offset += 4 + desc_len + 16  # skip description + width/height/depth/colors ints
+                    img_len = struct.unpack(">I", pic_data[offset:offset + 4])[0]
+                    offset += 4
+                    result["thumbnail_bytes"] = pic_data[offset:offset + img_len]
+                except Exception as e:
+                    logger.warning(f"[music] ogg cover art parse failed: {e}")
+
+    except Exception as e:
+        logger.error(f"[music] metadata extraction failed: {e}")
+
+    return result
+
+
+async def _handle_audio_attachments(
+    message: discord.Message,
+    attachments: list[discord.Attachment],
+    client,
+) -> None:
+    """Queue audio attachments directly into the music system, bypassing LLM.
+
+    Downloads each attachment to extract embedded metadata (title, artist,
+    duration, cover art). Falls back to filename if tags are absent.
+    """
+    requester = message.author
+
+    if not requester.voice or not requester.voice.channel:
+        await message.reply(
+            "Únete a un canal de voz primero para que pueda reproducir el archivo.",
+            mention_author=False,
+        )
+        return
+
+    guild = message.guild
+    voice_channel = requester.voice.channel
+    player = voice_manager.get_player(guild)
+    requested_by = clean_username(requester.nick, requester.name)
+
+    async with voice_manager._get_play_lock(guild.id):
+        await player.connect(voice_channel)
+
+        if not player.text_channel:
+            player.text_channel = message.channel
+
+        queued_titles = []
+        is_busy = player.is_playing or (
+            player.is_connected and player.voice_client.is_paused()
+        )
+
+        for attachment in attachments:
+            ext = os.path.splitext(attachment.filename)[1].lower()
+            filename_title = os.path.splitext(attachment.filename)[0]
+
+            logger.info(f"[music] extracting metadata from {attachment.filename!r}")
+            meta = await _extract_audio_metadata(attachment.url, ext)
+
+            title           = meta["title"] or filename_title
+            artist          = meta["artist"]
+            duration        = meta["duration"]
+            thumbnail_bytes = meta["thumbnail_bytes"]
+
+            track = Track(
+                title=title,
+                stream_url=attachment.url,
+                requested_by=requested_by,
+                webpage_url=attachment.url,
+                duration=duration,
+                thumbnail=None,
+                thumbnail_bytes=thumbnail_bytes,
+                artist=artist,
+                resolved=True,
+            )
+            player.queue.append(track)
+            queued_titles.append(title)
+            logger.info(
+                f"[music] queued attachment: {title!r} | "
+                f"artist={artist!r} | duration={duration}s | "
+                f"cover={'yes' if thumbnail_bytes else 'no'}"
+            )
+
+        if not is_busy:
+            player.play_next()
+
+    if len(queued_titles) == 1:
+        if is_busy:
+            await message.reply(f"Agregado a la cola: **{queued_titles[0]}**", mention_author=False)
+        else:
+            await message.reply(f"Reproduciendo: **{queued_titles[0]}**", mention_author=False)
+    else:
+        titles_str = "\n".join(f"• {t}" for t in queued_titles)
+        await message.reply(
+            f"Agregados {len(queued_titles)} archivos a la cola:\n{titles_str}",
+            mention_author=False,
+        )
 
 
 async def _execute_tool_call(tool_call, message):
@@ -195,6 +385,7 @@ async def _execute_tool_call(tool_call, message):
                             queue_size=len(player.queue),
                             requested_by=track.requested_by,
                             thumbnail_url=track.thumbnail,
+                            thumbnail_bytes=track.thumbnail_bytes,
                         )
 
             elif result.startswith("Queued"):
@@ -239,8 +430,11 @@ async def _execute_tool_call(tool_call, message):
             return await voice_manager.stop(guild)
         elif name == "leave_voice":
             from voice.listener import voice_listener_manager
-            await voice_listener_manager.stop_listening(guild)
-            return await voice_manager.leave(guild)
+            player = voice_manager.get_player(guild)
+            player.queue.clear()
+            if player.is_playing:
+                player.voice_client.stop_playing()
+            return "Leaving the voice channel."
         elif name == "now_playing":
             return await voice_manager.now_playing(guild)
         elif name == "get_queue":
@@ -303,6 +497,13 @@ async def handle_bot_mention(message, client):
     total_tokens = 0
 
     logger.info(f"→ {user_name} ({msg_len} chars): {message.content[:80]!r}")
+
+    # ── Audio attachment shortcut — bypass LLM entirely ───────────────────────
+    audio_attachments = _get_audio_attachments(message)
+    if audio_attachments:
+        logger.info(f"  {len(audio_attachments)} audio attachment(s) detected — queuing directly")
+        await _handle_audio_attachments(message, audio_attachments, client)
+        return
 
     async with message.channel.typing():
         t_prep = time.perf_counter()
