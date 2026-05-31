@@ -79,12 +79,12 @@ async def execute_tool_call(tool_call, message):
                 try:
                     if result.startswith("Queued"):
                         track_title = result.split(": ", 1)[1] if ": " in result else result
-                        await search_msg.edit(content=f"Heard: *{query}*\nQueued: **{track_title}**")
+                        await search_msg.edit(content=f"Queued: **{track_title}**")
                     elif result.startswith("Now playing:"):
                         track_title = result.split(": ", 1)[1] if ": " in result else result
-                        await search_msg.edit(content=f"Heard: *{query}*\nNow playing: **{track_title}**")
+                        await search_msg.edit(content=f"Now playing: **{track_title}**")
                     else:
-                        await search_msg.edit(content=f"Heard: *{query}*\n{result}")
+                        await search_msg.edit(content=result)
                 except Exception:
                     pass
 

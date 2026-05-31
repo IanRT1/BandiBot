@@ -101,6 +101,7 @@ class GuildPlayer:
             self.voice_client = await voice_channel.connect(
                 cls=voice_recv.VoiceRecvClient
             )
+        await self._ensure_voice_listener(voice_channel)
 
     async def disconnect(self):
         if self._idle_task:
@@ -118,6 +119,23 @@ class GuildPlayer:
         self.current = None
         self.queue.clear()
         self.now_playing_message = None
+
+    async def _ensure_voice_listener(self, voice_channel: discord.VoiceChannel):
+        """Start wake-word listening after a music-driven voice connection."""
+        if not self.voice_client or not self.voice_client.is_connected():
+            return
+        try:
+            from voice.listener import voice_listener_manager
+
+            client = self.voice_client.client
+            await voice_listener_manager.start_listening(
+                self.guild,
+                voice_channel,
+                client,
+                client.loop,
+            )
+        except Exception as e:
+            logger.error(f"[voice] failed to start listener after music connect: {e}")
 
     def start_resolver(self):
         """Start the background resolver loop if not already running."""

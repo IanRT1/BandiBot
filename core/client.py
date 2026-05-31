@@ -133,7 +133,7 @@ async def on_message(message):
 @client.event
 async def on_voice_state_update(member, before, after):
     # When the BOT joins a voice channel — start listening automatically
-    if member == client.user:
+    if member.id == client.user.id:
         if after.channel is not None and before.channel != after.channel:
             await asyncio.sleep(1.0)
             loop = asyncio.get_event_loop()
