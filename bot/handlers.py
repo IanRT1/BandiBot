@@ -39,6 +39,8 @@ import re
 import struct
 import time
 from textwrap import dedent
+from collections import deque
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import aiohttp
@@ -291,10 +293,10 @@ async def _handle_audio_attachments(
     requested_by = clean_username(requester.nick, requester.name)
 
     async with voice_manager._get_play_lock(guild.id):
-        await player.connect(voice_channel)
-
         if not player.text_channel:
             player.text_channel = message.channel
+
+        await player.connect(voice_channel)
 
         queued_titles = []
         is_busy = player.is_playing or (
@@ -358,37 +360,42 @@ async def _execute_tool_call(tool_call, message):
 
     try:
         if name == "play_music":
-            try:
-                result = await asyncio.wait_for(
-                    voice_manager.play(guild, requester, args.get("query", "")),
-                    timeout=30.0,
-                )
-            except asyncio.TimeoutError:
-                return "Took too long to resolve that track. Try again."
-
             player = voice_manager.get_player(guild)
-
             if not player.text_channel and message.channel:
                 player.text_channel = message.channel
 
-            if result.startswith("Now playing:"):
-                if message.channel:
-                    from music.now_playing import post_now_playing
-                    track = player.current
-                    if track:
-                        await post_now_playing(
-                            message.channel,
-                            player,
-                            title=track.title,
-                            artist=track.artist,
-                            duration_seconds=track.duration,
-                            queue_size=len(player.queue),
-                            requested_by=track.requested_by,
-                            thumbnail_url=track.thumbnail,
-                            thumbnail_bytes=track.thumbnail_bytes,
-                        )
+            query = args.get("query", "")
+            search_msg = None
+            if message.channel:
+                try:
+                    search_msg = await message.channel.send(f"🔍 Searching: *{query}*")
+                except Exception:
+                    pass
 
-            elif result.startswith("Queued"):
+            try:
+                result = await asyncio.wait_for(
+                    voice_manager.play(guild, requester, query),
+                    timeout=30.0,
+                )
+            except asyncio.TimeoutError:
+                if search_msg:
+                    try:
+                        await search_msg.delete()
+                    except Exception:
+                        pass
+                return "Took too long to resolve that track. Try again."
+
+            if search_msg:
+                try:
+                    if result.startswith("Queued"):
+                        track_title = result.split(": ", 1)[1] if ": " in result else result
+                        await search_msg.edit(content=f"✅ Queued: **{track_title}**")
+                    else:
+                        await search_msg.delete()
+                except Exception:
+                    pass
+
+            if result.startswith("Queued"):
                 if message.channel:
                     from music.now_playing import update_now_playing_queue
                     await update_now_playing_queue(player, len(player.queue))
@@ -405,14 +412,12 @@ async def _execute_tool_call(tool_call, message):
             if not queries:
                 return "No songs provided."
 
-            if is_playlist:
-                result = await voice_manager.queue_playlist(guild, requester, queries[0])
-            else:
-                result = await voice_manager.queue_bulk(guild, requester, queries)
-
             player = voice_manager.get_player(guild)
-            if not player.text_channel and message.channel:
-                player.text_channel = message.channel
+
+            if is_playlist:
+                result = await voice_manager.queue_playlist(guild, requester, queries[0], text_channel=message.channel)
+            else:
+                result = await voice_manager.queue_bulk(guild, requester, queries, text_channel=message.channel)
 
             if message.channel:
                 from music.now_playing import update_now_playing_queue
@@ -450,21 +455,49 @@ async def _execute_tool_call(tool_call, message):
                 if not match:
                     return f"Could not find '{query}' in queue."
                 from_pos = match
-            return await voice_manager.move_track(guild, int(from_pos), int(to_pos))
+            result = await voice_manager.move_track(guild, int(from_pos), int(to_pos))
+            from voice.handler import _FakeMsgProxy
+            if isinstance(message, _FakeMsgProxy) and message.channel:
+                await message.channel.send(result)
+            return result
         elif name == "delete_track":
-            position = args.get("position")
-            if position is None:
-                query = args.get("track_name", "").lower()
-                player = voice_manager.get_player(guild)
-                queue_list = list(player.queue)
-                if query in ("last", "last song", "última", "última canción"):
-                    position = len(queue_list)
-                else:
-                    match = next((i+1 for i, t in enumerate(queue_list) if query in t.title.lower()), None)
-                    if not match:
-                        return f"Could not find '{query}' in queue."
-                    position = match
-            return await voice_manager.delete_track(guild, int(position))
+            from voice.handler import _FakeMsgProxy
+            player = voice_manager.get_player(guild)
+            queue_list = list(player.queue)
+
+            positions = args.get("positions")
+            if not positions:
+                # fall back to single position or track_name
+                position = args.get("position")
+                if position is None:
+                    query = args.get("track_name", "").lower()
+                    if query in ("last", "last song", "última", "última canción"):
+                        position = len(queue_list)
+                    else:
+                        match = next((i+1 for i, t in enumerate(queue_list) if query in t.title.lower()), None)
+                        if not match:
+                            return f"Could not find '{query}' in queue."
+                        position = match
+                positions = [position]
+
+            # validate all positions first
+            max_pos = len(queue_list)
+            invalid = [p for p in positions if p < 1 or p > max_pos]
+            if invalid:
+                return f"Invalid position(s): {invalid}. Queue has {max_pos} songs."
+
+            # delete highest index first to avoid shift
+            results = []
+            for pos in sorted(positions, reverse=True):
+                track = queue_list.pop(pos - 1)
+                results.append(track.title)
+
+            player.queue = deque(queue_list)
+            result = f"Removed {len(results)} song(s): " + ", ".join(f"'{t}'" for t in results)
+
+            if isinstance(message, _FakeMsgProxy) and message.channel:
+                await message.channel.send(result)
+            return result
         elif name == "join_voice":
             if not requester.voice or not requester.voice.channel:
                 return "User is not in a voice channel."
@@ -482,6 +515,55 @@ async def _execute_tool_call(tool_call, message):
             return result
         elif name == "get_member_activity":
             return await asyncio.to_thread(build_member_activity_context, guild)
+        elif name == "clip_audio":
+            from voice.listener import voice_listener_manager
+            session = voice_listener_manager.get_session(guild)
+            if not session or not session.sink:
+                return "Not in a voice channel."
+
+            pcm = session.get_clip_pcm()
+            if not pcm:
+                logger.warning("[clip] no audio in buffer")
+                return "No audio captured yet."
+
+            logger.info(f"[clip] encoding {len(pcm)} bytes of PCM")
+            import subprocess
+            try:
+                proc = subprocess.run(
+                    [
+                        "ffmpeg", "-y",
+                        "-f", "s16le", "-ar", "48000", "-ac", "2",
+                        "-i", "pipe:0",
+                        "-codec:a", "libmp3lame", "-q:a", "4",
+                        "-f", "mp3", "pipe:1",
+                    ],
+                    input=pcm,
+                    capture_output=True,
+                    timeout=15,
+                )
+                mp3_bytes = proc.stdout
+                if not mp3_bytes:
+                    logger.error(f"[clip] ffmpeg produced no output. stderr: {proc.stderr.decode()}")
+                    return "Failed to encode clip."
+                logger.info(f"[clip] encoded {len(mp3_bytes)} bytes, sending to channel={message.channel}")
+            except Exception as e:
+                logger.error(f"[clip] ffmpeg error: {e}")
+                return "Failed to encode clip."
+
+            channel = message.channel
+            if not channel:
+                logger.warning("[clip] no text channel to send to")
+                return "Clip encoded but no channel to send it to."
+
+            timestamp = datetime.now(_PACIFIC).strftime("%Y-%m-%d_%H-%M")
+            requester_name = clean_username(getattr(requester, 'nick', None), requester.name).replace(" ", "_")
+            filename = f"clip_{requester_name}_{timestamp}.mp3"
+
+            await channel.send(
+                file=discord.File(fp=io.BytesIO(mp3_bytes), filename=filename)
+            )
+            logger.info(f"[clip] sent as {filename}")
+            return f"Clip sent to #{channel.name} as {filename}."
         else:
             return f"Unknown tool: {name}"
 
@@ -524,6 +606,11 @@ async def handle_bot_mention(message, client):
             *history_messages,
             {"role": "user", "content": f"[{user_name}] {user_message}"},
         ]
+
+        player = voice_manager.get_player(message.guild)
+        if player.current or player.queue:
+            queue_str = await voice_manager.get_queue(message.guild)
+            messages.append({"role": "system", "content": f"**Current Queue:**\n{queue_str}\n\nDo NOT re-queue any song already in this list."})
 
         t_llm = time.perf_counter()
         response_data = await send_to_openai(

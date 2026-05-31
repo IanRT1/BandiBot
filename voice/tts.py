@@ -100,7 +100,7 @@ class MixerSource(discord.AudioSource):
     TTS can be cancelled mid-stream via cancel().
     """
 
-    def __init__(self, primary: discord.AudioSource):
+    def __init__(self, primary: discord.AudioSource, clip_buffer=None):
         self._primary      = primary
         self._tts_buf      = bytearray()
         self._tts_done     = False
@@ -108,6 +108,41 @@ class MixerSource(discord.AudioSource):
         self._cancelled    = False
         self._lock         = threading.Lock()
         self._tts_finished = threading.Event()
+        self._clip_buffer  = clip_buffer
+
+    def read(self) -> bytes:
+        music_frame = self._primary.read()
+        if not music_frame:
+            return b""
+
+        music = np.frombuffer(music_frame, dtype=np.int16).astype(np.int32)
+
+        with self._lock:
+            has_tts  = len(self._tts_buf) >= DISCORD_FRAME_SIZE
+            tts_done = self._tts_done and len(self._tts_buf) < DISCORD_FRAME_SIZE
+
+        if has_tts:
+            with self._lock:
+                tts_frame = bytes(self._tts_buf[:DISCORD_FRAME_SIZE])
+                del self._tts_buf[:DISCORD_FRAME_SIZE]
+            tts   = np.frombuffer(tts_frame, dtype=np.int16).astype(np.int32)
+            mixed = (music * MUSIC_DUCK_VOLUME).astype(np.int32) + tts
+            mixed = np.clip(mixed, -32768, 32767).astype(np.int16)
+            frame = mixed.tobytes()
+        elif tts_done and self._tts_active:
+            with self._lock:
+                self._tts_active = False
+                self._tts_done   = False
+                self._cancelled  = False
+            self._tts_finished.set()
+            frame = music_frame
+        else:
+            frame = music_frame
+
+        if self._clip_buffer is not None:
+            self._clip_buffer.append(np.frombuffer(frame, dtype=np.int16).copy())
+
+        return frame
 
     def feed_tts(self, pcm_mono: bytes):
         if not pcm_mono:
@@ -143,53 +178,17 @@ class MixerSource(discord.AudioSource):
     def wait_tts_done(self, timeout: float = 30.0) -> bool:
         return self._tts_finished.wait(timeout=timeout)
 
-    def read(self) -> bytes:
-        music_frame = self._primary.read()
-        if not music_frame:
-            return b""
-
-        music = np.frombuffer(music_frame, dtype=np.int16).astype(np.int32)
-
-        with self._lock:
-            has_tts  = len(self._tts_buf) >= DISCORD_FRAME_SIZE
-            tts_done = self._tts_done and len(self._tts_buf) < DISCORD_FRAME_SIZE
-
-        if has_tts:
-            with self._lock:
-                tts_frame = bytes(self._tts_buf[:DISCORD_FRAME_SIZE])
-                del self._tts_buf[:DISCORD_FRAME_SIZE]
-            tts   = np.frombuffer(tts_frame, dtype=np.int16).astype(np.int32)
-            mixed = (music * MUSIC_DUCK_VOLUME).astype(np.int32) + tts
-            mixed = np.clip(mixed, -32768, 32767).astype(np.int16)
-            return mixed.tobytes()
-
-        elif tts_done and self._tts_active:
-            with self._lock:
-                self._tts_active = False
-                self._tts_done   = False
-                self._cancelled  = False
-            self._tts_finished.set()
-            return music_frame
-
-        else:
-            return music_frame
-
-    def is_opus(self) -> bool:
-        return False
-
-    def cleanup(self):
-        self._primary.cleanup()
-
 
 class _StandaloneSource(discord.AudioSource):
     """Standalone TTS source for when no music is playing. Cancellable."""
 
-    def __init__(self):
+    def __init__(self, clip_buffer=None):
         self._buf          = bytearray()
         self._lock         = threading.Lock()
         self._done         = False
         self._cancelled    = False
         self._finished_evt = threading.Event()
+        self._clip_buffer  = clip_buffer
 
     def feed(self, pcm_mono: bytes):
         with self._lock:
@@ -223,20 +222,21 @@ class _StandaloneSource(discord.AudioSource):
             if len(self._buf) >= DISCORD_FRAME_SIZE:
                 data = bytes(self._buf[:DISCORD_FRAME_SIZE])
                 del self._buf[:DISCORD_FRAME_SIZE]
-                return data
             elif self._done:
                 if self._buf:
-                    # Drain remaining audio, padded to frame size
                     data = bytes(self._buf).ljust(DISCORD_FRAME_SIZE, b'\x00')
                     self._buf.clear()
-                    return data[:DISCORD_FRAME_SIZE]
-                logger.info("[tts]  → standalone source exhausted, returning empty")
-                return b""
+                else:
+                    logger.info("[tts]  → standalone source exhausted, returning empty")
+                    return b""
             else:
                 return bytes(DISCORD_FRAME_SIZE)
 
+        if self._clip_buffer is not None:
+            self._clip_buffer.append(np.frombuffer(data, dtype=np.int16).copy())
+        return data
+
     def _after_playback(self, error):
-        """Called by discord audio thread when playback ends."""
         if error:
             logger.error(f"[tts]  ✗ standalone playback error: {error}")
         self._finished_evt.set()
@@ -275,13 +275,8 @@ async def speak(
     voice_client: discord.VoiceClient,
     text: str,
     guild=None,
+    clip_buffer=None,
 ):
-    """
-    Stream TTS and mix it into the currently playing music.
-    Routes to Deepgram or Kokoro based on TTS_PROVIDER config.
-    If no music is playing, plays TTS standalone.
-    Cancellable via cancel_tts().
-    """
     if not voice_client or not voice_client.is_connected():
         return
     if not text or not text.strip():
@@ -294,9 +289,9 @@ async def speak(
     is_mixer = isinstance(source, MixerSource) and voice_client.is_playing()
 
     if TTS_PROVIDER == "kokoro":
-        await _speak_kokoro(voice_client, text, t_start, is_mixer, source)
+        await _speak_kokoro(voice_client, text, t_start, is_mixer, source, clip_buffer=clip_buffer)
     else:
-        await _speak_deepgram(voice_client, text, t_start, is_mixer, source)
+        await _speak_deepgram(voice_client, text, t_start, is_mixer, source, clip_buffer=clip_buffer)
 
 
 async def _speak_deepgram(
@@ -305,10 +300,11 @@ async def _speak_deepgram(
     t_start: float,
     is_mixer: bool,
     source,
+    clip_buffer=None,
 ):
     """Deepgram Aura-2 TTS path."""
     if not is_mixer:
-        await _speak_standalone(voice_client, text, t_start, provider="deepgram")
+        await _speak_standalone(voice_client, text, t_start, provider="deepgram", clip_buffer=clip_buffer)
         return
 
     mixer: MixerSource = source
@@ -369,10 +365,11 @@ async def _speak_kokoro(
     t_start: float,
     is_mixer: bool,
     source,
+    clip_buffer=None,
 ):
     """Kokoro local TTS path."""
     if not is_mixer:
-        await _speak_standalone(voice_client, text, t_start, provider="kokoro")
+        await _speak_standalone(voice_client, text, t_start, provider="kokoro", clip_buffer=clip_buffer)
         return
 
     mixer: MixerSource = source
@@ -383,7 +380,6 @@ async def _speak_kokoro(
         pipeline = _get_kokoro_pipeline()
         chunks = []
         for _, _, audio in pipeline(text, voice=KOKORO_VOICE, speed=KOKORO_SPEED):
-            # audio is float32 numpy array at 24kHz
             resampled = _resample_24k_to_48k(audio)
             chunks.append(resampled.tobytes())
         return chunks
@@ -402,7 +398,6 @@ async def _speak_kokoro(
                 t_first = (time.perf_counter() - t_start) * 1000
                 logger.info(f"[tts]  → first chunk in {t_first:.0f}ms")
                 first_chunk = False
-            # Feed in KOKORO_CHUNK_SIZE sample chunks
             for i in range(0, len(chunk_bytes), KOKORO_CHUNK_SIZE * 2):
                 mixer.feed_tts(chunk_bytes[i:i + KOKORO_CHUNK_SIZE * 2])
 
@@ -427,13 +422,9 @@ async def _speak_standalone(
     text: str,
     t_start: float,
     provider: str = "deepgram",
+    clip_buffer=None,
 ):
-    """
-    Play TTS standalone when no music is playing.
-    Supports both Deepgram and Kokoro providers.
-    Uses threading.Event for reliable cancellation from any thread.
-    """
-    source = _StandaloneSource()
+    source = _StandaloneSource(clip_buffer=clip_buffer)
     voice_client._standalone_tts = source
 
     logger.debug(f"[tts]  → standalone play | is_playing={voice_client.is_playing()} is_connected={voice_client.is_connected()} source={voice_client.source}")
@@ -477,7 +468,6 @@ async def _speak_standalone(
             source.set_done()
 
     else:
-        # Deepgram path
         url = (
             f"https://api.deepgram.com/v1/speak"
             f"?model={TTS_MODEL}&encoding=linear16"

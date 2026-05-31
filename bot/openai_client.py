@@ -67,7 +67,9 @@ MUSIC_TOOLS = [
                 "Queue multiple songs at once. Use this when the user asks to add several songs, "
                 "provides a list of songs, or pastes a YouTube playlist URL. "
                 "For text lists, each item becomes a separate search query. "
-                "For a YouTube playlist URL, pass it as the single item in the list."
+                "For a YouTube playlist URL, pass it as the single item in the list. "
+                "ONLY include songs explicitly requested in the CURRENT message. "
+                "Do NOT include songs from previous messages or that are already playing."
             ),
             "parameters": {
                 "type": "object",
@@ -119,17 +121,17 @@ MUSIC_TOOLS = [
         "function": {
             "name": "delete_track",
             "description": (
-                "Remove a specific song from the queue without affecting playback. "
-                "Can reference the track by position number, by name/partial name, "
-                "or by recency (e.g. 'the last song you added', 'the one I just queued'). "
-                "Does NOT affect the currently playing track."
+                "Remove one or more songs from the queue without affecting playback. "
+                "Can reference tracks by position number(s), by name/partial name, "
+                "or by recency. Does NOT affect the currently playing track."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "position": {
-                        "type": "integer",
-                        "description": "Queue position of the track to remove (1-based). Optional if track_name is provided.",
+                    "positions": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": "List of queue positions to remove (1-based). Use this for one or multiple positions.",
                     },
                     "track_name": {
                         "type": "string",
@@ -138,6 +140,17 @@ MUSIC_TOOLS = [
                 },
             },
         },
+    },
+    {
+    "type": "function",
+    "function": {
+        "name": "clip_audio",
+        "description": (
+            "Record and send the last 30 seconds of voice channel audio as an mp3 file in chat. "
+            "Use when the user asks to clip, record, or save what was just said or played (eg. \"Bandibot Clip that!\""")"
+        ),
+        "parameters": {"type": "object", "properties": {}},
+    },
     },
     {
         "type": "function",

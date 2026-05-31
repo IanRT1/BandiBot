@@ -43,6 +43,7 @@ import discord
 import numpy as np
 from discord.ext import voice_recv
 from openwakeword.model import Model
+
 from silero_vad import load_silero_vad
 
 logger = logging.getLogger(__name__)
@@ -76,6 +77,8 @@ MONITOR_INTERVAL      = 0.1
 
 SESSION_HISTORY_SIZE  = 10
 IDLE_TIMEOUT          = 600
+
+CLIP_BUFFER_SECONDS = 30
 
 # ── Audio helpers ─────────────────────────────────────────────────────────────
 
@@ -189,6 +192,10 @@ class BandiBotSink(voice_recv.AudioSink):
                 return
             raw    = np.frombuffer(pcm, dtype=np.int16).copy()
             mono48 = _stereo_to_mono(raw)
+            stereo = np.empty(len(mono48) * 2, dtype=np.int16)
+            stereo[0::2] = mono48
+            stereo[1::2] = mono48
+            self.gs.clip_buffer.append(stereo)
             uid    = user.id
             u      = self._get_user(uid)
 
@@ -356,6 +363,7 @@ class GuildVoiceSession:
         self.client = client
         self.loop   = loop
         self._pipeline_is_music = False
+        self.clip_buffer: deque = deque(maxlen=3000)
 
         self._sessions: dict[int, VoiceSession] = {}
 
@@ -378,6 +386,21 @@ class GuildVoiceSession:
 
     def bump_activity(self):
         self._last_activity = time.time()
+
+    def get_clip_pcm(self) -> bytes:
+        if not self.clip_buffer:
+            return b""
+        frames = list(self.clip_buffer)
+        if not frames:
+            return b""
+        audio = np.concatenate(frames).astype(np.int16)
+        target_samples = 48000 * 30 * 2
+        if len(audio) < target_samples:
+            padding = np.zeros(target_samples - len(audio), dtype=np.int16)
+            audio = np.concatenate([padding, audio])
+        else:
+            audio = audio[-target_samples:]
+        return audio.tobytes()
 
     def get_session(self, user: discord.User) -> VoiceSession:
         if user.id not in self._sessions:
@@ -448,6 +471,8 @@ class GuildVoiceSession:
                 music_active = player.is_playing or bool(player.queue) or (
                     player.is_connected and player.voice_client and player.voice_client.is_paused()
                 )
+                if music_active:
+                    self._last_activity = time.time()
                 if not music_active and time.time() - self._last_activity >= IDLE_TIMEOUT:
                     logger.info(f"[voice] idle timeout — leaving {self.guild.name}")
                     await self.stop()
@@ -576,7 +601,7 @@ class GuildVoiceSession:
 
                 if response_text:
                     session.add("assistant", response_text)
-                    await speak(self._voice_client, response_text, guild=self.guild)
+                    await speak(self._voice_client, response_text, guild=self.guild, clip_buffer=self.clip_buffer)
                     if should_leave:
                         await asyncio.sleep(1)
                         logger.info("[voice] → leaving voice channel")

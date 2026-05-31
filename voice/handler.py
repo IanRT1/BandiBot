@@ -50,6 +50,18 @@ def _build_voice_context(member: discord.Member, guild: discord.Guild) -> str:
         getattr(member, 'nick', None),
         member.name
     )
+
+    bot_voice = guild.me.voice
+    if bot_voice and bot_voice.channel:
+        vc_members = [
+            clean_username(m.nick, m.name)
+            for m in bot_voice.channel.members
+            if not m.bot
+        ]
+        vc_line = f"- Members in Voice Channel: {', '.join(vc_members) if vc_members else 'None'}"
+    else:
+        vc_line = "- Members in Voice Channel: Unknown"
+
     return (
         f"**Server Information**:\n"
         f"- Server Name: {guild.name}\n"
@@ -57,9 +69,9 @@ def _build_voice_context(member: discord.Member, guild: discord.Guild) -> str:
         f"- Current Date: {get_current_pst_date()}\n"
         f"- Server Time: {get_current_pst_time()}\n"
         f"- Current User: {user_nick_or_name}\n"
-        f"- Interaction Mode: Voice"
+        f"- Interaction Mode: Voice\n"
+        f"{vc_line}"
     )
-
 
 class _FakeMsgProxy:
     def __init__(self, guild: discord.Guild, member: discord.Member):

@@ -116,12 +116,18 @@ async def on_ready():
     logger.info(f"Logged in as {client.user} (ID: {client.user.id})")
 
 
+_processed_messages: set[int] = set()
+
 @client.event
 async def on_message(message):
     if message.author == client.user:
         return
     if message.mention_everyone or client.user in message.mentions:
+        if message.id in _processed_messages:
+            return
+        _processed_messages.add(message.id)
         await handle_bot_mention(message, client)
+        _processed_messages.discard(message.id)
 
 
 @client.event

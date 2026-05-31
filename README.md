@@ -21,7 +21,7 @@
 
 ## Overview
 
-BandiBot is a fully self-hosted Discord bot designed for friend group servers. It listens continuously in voice channels for a custom wake word, transcribes commands via Deepgram, reasons through them with an OpenAI LLM, and responds via text-to-speech — all while music plays uninterrupted in the background.
+BandiBot is a fully self-hosted Discord bot designed for friend group servers. It listens continuously in voice channels for a custom wake word, transcribes commands via Deepgram, reasons through them with an OpenAI LLM, and responds via the configured text-to-speech provider — all while music plays uninterrupted in the background.
 
 Every instance is independently hosted by the user. There is no central server, no shared infrastructure, and no data leaving your machine except to the APIs you configure (Discord, OpenAI, Deepgram).
 
@@ -34,13 +34,15 @@ Every instance is independently hosted by the user. There is no central server, 
 - **Per-user voice activity detection** using Silero VAD with configurable grace periods and silence thresholds
 - **Speech-to-text** via Deepgram Nova-3
 - **LLM reasoning** with full tool call support via OpenAI
-- **Text-to-speech** via Deepgram Aura-2, mixed directly into the music stream at PCM level — music never pauses
+- **Text-to-speech** via Kokoro by default, with a Deepgram Aura-2 path available in code; speech is mixed directly into the music stream at PCM level so music never pauses
 - **Mid-speech interruption** — trigger the wake word while the bot is speaking to immediately cancel and start a new command
 - **Per-user isolation** — only the user who triggered the wake word has their audio captured; other speakers are ignored
 
 ### Music
 - **YouTube playback** via yt-dlp and FFmpeg with loudness normalization
-- **Queue management** — add, remove, move, shuffle, loop
+- **Queue management** — add, remove, move, skip, pause, resume, and stop through natural language, with loop and shuffle available from the Now Playing controls
+- **Audio attachments** — attached audio files can be queued directly, with metadata and embedded cover art extracted when available
+- **Voice clips** — save the last 30 seconds of voice-channel audio as an MP3 clip
 - **Single song queuing** — resolved on the spot before playing
 - **Bulk song queuing** — multiple songs or YouTube playlist URLs queued instantly as placeholders, resolved one track ahead in the background as songs play
 - **Graceful error handling** — unresolvable tracks are skipped with a notification at playback time
@@ -75,7 +77,7 @@ Discord Gateway
                           │         └── VAD (Silero)
                           ├── voice/stt.py (Deepgram Nova-3)
                           ├── voice/handler.py (LLM + tool calls)
-                          └── voice/tts.py (Deepgram Aura-2 → MixerSource)
+                          └── voice/tts.py (Kokoro / Deepgram Aura-2 → MixerSource)
                                     └── music/player.py (FFmpeg → MixerSource → Discord)
 ```
 
@@ -96,6 +98,7 @@ Discord Gateway
 ### System
 - Python 3.11+
 - FFmpeg installed and available in `PATH`
+- espeak-ng installed and available in `PATH` when using the default Kokoro TTS provider
 
 ### Python Dependencies
 
@@ -108,7 +111,7 @@ pip install -r requirements.txt
 ### API Keys
 - [Discord Developer Portal](https://discord.com/developers/applications) — Bot token
 - [OpenAI Platform](https://platform.openai.com/) — API key
-- [Deepgram Console](https://console.deepgram.com/) — API key (used for both STT and TTS)
+- [Deepgram Console](https://console.deepgram.com/) — API key used for STT, and also for TTS if the Deepgram TTS path is selected in code
 
 ### FFmpeg
 
@@ -132,6 +135,15 @@ sudo apt install ffmpeg
 Verify installation:
 ```bash
 ffmpeg -version
+```
+
+### espeak-ng
+
+The current code defaults to Kokoro TTS in `core/config.py`. Kokoro requires `espeak-ng` as a system dependency.
+
+Verify installation:
+```bash
+espeak-ng --version
 ```
 
 ---
@@ -174,7 +186,7 @@ Edit `.env` with your API keys (see [Configuration](#configuration)).
   - `SERVER MEMBERS INTENT`
   - `PRESENCE INTENT`
 - Copy the bot token into your `.env`
-- Invite the bot to your server with the `bot` and `applications.commands` scopes and `Administrator` permissions
+- Invite the bot to your server with the `bot` scope and the permissions needed for message reading, voice connect/speak, embeds, attachments, and message management. `Administrator` is the simplest private-server setup, but not strictly required.
 
 **6. Place your wake word model**
 
@@ -212,19 +224,13 @@ The easiest way to train a model is via the official Google Colab notebook:
 
 Provide your wake word text (e.g. "BandiBot"), let it generate synthetic samples, train, and export the resulting `.onnx` file.
 
-### Testing Your Model
-
-Use the included `openwakeword_test.py` to test detection sensitivity before deploying:
-
-```bash
-python openwakeword_test.py
-```
+### Tuning Detection
 
 Adjust the following constants in `voice/listener.py` to tune detection:
 
 | Constant | Default | Description |
 |---|---|---|
-| `WAKEWORD_THRESHOLD` | `0.01` | Minimum score per chunk to count as a hit |
+| `WAKEWORD_THRESHOLD` | `0.05` | Minimum score per chunk to count as a hit |
 | `SMOOTHING_WINDOW` | `3` | Number of recent chunks to evaluate |
 | `HITS_REQUIRED` | `2` | Chunks above threshold needed to trigger |
 | `WAKEWORD_COOLDOWN` | `2` | Seconds between triggers |
@@ -247,7 +253,7 @@ BandiBot/
 │   ├── listener.py         # Wake word, VAD, STT, TTS pipeline per guild
 │   ├── handler.py          # Voice command LLM bridge, _FakeMsgProxy
 │   ├── stt.py              # Deepgram STT wrapper
-│   └── tts.py              # Deepgram TTS, MixerSource, audio mixing
+│   └── tts.py              # Kokoro / Deepgram TTS, MixerSource, audio mixing
 │
 ├── music/
 │   ├── player.py           # Music queue, yt-dlp resolution, FFmpeg playback
@@ -260,7 +266,7 @@ BandiBot/
 │   └── utils.py            # Shared utilities, member presence, time formatting
 │
 ├── assets/
-│   ├── BandiBot.onnx       # Wake word model (not included, train your own)
+│   ├── BandiBot.onnx       # Wake word model expected by voice/listener.py
 │   └── wake_activation.wav # Wake word confirmation sound
 │
 ├── data/
@@ -268,11 +274,10 @@ BandiBot/
 │   └── server_info.txt     # Server history and lore (editable)
 │
 ├── __main__.py             # Package entry point
-├── openwakeword_test.py    # Wake word model tester
 ├── pyproject.toml          # Package config, bandibot CLI entry point
 ├── requirements.txt        # Python dependencies
 ├── .env.example            # Environment variable template
-├── .env                    # API keys (not committed)
+├── .env                    # Secrets/API keys (not committed)
 ├── .gitignore
 ├── LICENSE
 └── README.md
@@ -294,9 +299,13 @@ Edit `data/server_info.txt` to add your server's history, rules, events, member 
 
 Replace `assets/BandiBot.onnx` with any openWakeWord-compatible ONNX model. Update `WAKEWORD_MODEL_PATH` in `voice/listener.py` if you rename the file.
 
-### TTS Voice
+### TTS Provider And Voice
 
-Change `TTS_MODEL` in `voice/tts.py` to any [Deepgram Aura-2 voice](https://developers.deepgram.com/docs/tts-models). Default is `aura-2-javier-es` (Spanish male).
+The current provider is selected by `TTS_PROVIDER` in `core/config.py`. The default is `kokoro`.
+
+For Kokoro, change `KOKORO_VOICE`, `KOKORO_LANG`, and `KOKORO_SPEED` in `voice/tts.py`.
+
+For Deepgram, change `TTS_MODEL` in `voice/tts.py` to any [Deepgram Aura-2 voice](https://developers.deepgram.com/docs/tts-models). The current Deepgram model constant is `aura-2-javier-es` (Spanish male).
 
 ### STT Language
 

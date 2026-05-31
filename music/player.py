@@ -254,8 +254,6 @@ class GuildPlayer:
 
     def _play_resolved(self, track: "Track"):
         """Actually start playing a resolved track."""
-        from voice.tts import MixerSource
-
         if not self.is_connected:
             return
 
@@ -274,13 +272,18 @@ class GuildPlayer:
         track.total_paused = 0.0
         self.current = track
 
+        from voice.tts import MixerSource
+        from voice.listener import voice_listener_manager
+        session = voice_listener_manager.get_session(self.guild)
+        clip_buffer = session.clip_buffer if session else None
+
         ffmpeg_source = discord.FFmpegPCMAudio(
             track.stream_url,
             before_options=_FFMPEG_BEFORE,
             options=_FFMPEG_OPTS,
         )
         volume_source = discord.PCMVolumeTransformer(ffmpeg_source, volume=DEFAULT_VOLUME)
-        mixer_source  = MixerSource(volume_source)
+        mixer_source  = MixerSource(volume_source, clip_buffer=clip_buffer)
 
         loop = self.voice_client.client.loop
 
@@ -380,7 +383,7 @@ class VoiceManager:
                 position = len(player.queue)
                 return f"Queued at position {position}: {track.title}"
 
-    async def queue_bulk(self, guild, requester_member, queries: list[str]) -> str:
+    async def queue_bulk(self, guild, requester_member, queries: list[str], text_channel=None) -> str:
         """Queue multiple songs as placeholders and resolve them in background."""
         if not requester_member.voice or not requester_member.voice.channel:
             return "User is not in a voice channel; cannot play music."
@@ -390,6 +393,9 @@ class VoiceManager:
 
         async with self._get_play_lock(guild.id):
             await player.connect(voice_channel)
+
+            if text_channel and not player.text_channel:
+                player.text_channel = text_channel
 
             for query in queries:
                 track = Track(
@@ -411,7 +417,7 @@ class VoiceManager:
 
             return f"Added {len(queries)} songs to queue."
 
-    async def queue_playlist(self, guild, requester_member, url: str) -> str:
+    async def queue_playlist(self, guild, requester_member, url: str, text_channel=None) -> str:
         """Extract playlist entries and queue them as placeholders."""
         if not requester_member.voice or not requester_member.voice.channel:
             return "User is not in a voice channel; cannot play music."
@@ -430,6 +436,9 @@ class VoiceManager:
 
         async with self._get_play_lock(guild.id):
             await player.connect(voice_channel)
+
+            if text_channel and not player.text_channel:
+                player.text_channel = text_channel
 
             for track in entries:
                 player.queue.append(track)
@@ -486,6 +495,7 @@ class VoiceManager:
             return "Bot is not in a voice channel."
         if player._now_playing_view:
             await player._now_playing_view.on_queue_empty()
+            player._now_playing_view = None
         if player._resolver_task:
             player._resolver_task.cancel()
             player._resolver_task = None
@@ -563,33 +573,76 @@ class VoiceManager:
 
 
 def _resolve_track(query: str, requested_by: str) -> Track:
-    if not query.startswith("http://") and not query.startswith("https://"):
-        query = f"ytsearch5:{query}"
+    if query.startswith("http://") or query.startswith("https://"):
+        logger.info(f"  [yt-dlp] starting resolution for {query!r}")
+        t = time.time()
+        with yt_dlp.YoutubeDL(_YDL_OPTS) as ydl:
+            info = ydl.extract_info(query, download=False)
+        logger.info(f"  [yt-dlp] resolved in {time.time() - t:.2f}s")
 
-    logger.info(f"  [yt-dlp] starting resolution for {query!r}")
+        if "entries" in info:
+            entry = next((e for e in info["entries"] if e), None)
+            if not entry:
+                raise Exception("No playable results found.")
+            info = entry
+
+        logger.info(f"  [yt-dlp] using: {info.get('title', '?')!r}")
+        return Track(
+            title=info.get("title", "Unknown title"),
+            stream_url=info["url"],
+            requested_by=requested_by,
+            webpage_url=info.get("webpage_url", ""),
+            duration=info.get("duration"),
+            thumbnail=info.get("thumbnail"),
+            artist=info.get("uploader") or info.get("channel"),
+        )
+
+    # Text search
+    query_lower = query.lower()
+    search_query = f"ytsearch5:{query}"
+    logger.info(f"  [yt-dlp] searching {search_query!r}")
     t = time.time()
 
     with yt_dlp.YoutubeDL(_YDL_OPTS) as ydl:
-        info = ydl.extract_info(query, download=False)
-
+        info = ydl.extract_info(search_query, download=False)
     logger.info(f"  [yt-dlp] resolved in {time.time() - t:.2f}s")
 
-    if "entries" in info:
-        entry = next((e for e in info["entries"] if e), None)
-        if not entry:
-            raise Exception("No playable results found.")
-        info = entry
+    entries = [e for e in info.get("entries", []) if e]
+    if not entries:
+        raise Exception("No playable results found.")
 
-    logger.info(f"  [yt-dlp] using: {info.get('title', '?')!r}")
+    def _score(entry):
+        title = (entry.get("title") or "").lower()
+        duration = entry.get("duration") or 0
+        score = 0
 
+        if duration > 600:
+            score -= 2
+        if duration > 1200:
+            score -= 3
+
+        query_words = set(query_lower.split())
+        title_words = set(title.split())
+        score += len(query_words & title_words)
+
+        unwanted = ("reaction", "review", "full album", "commentary", "explained", "interview")
+        wanted_override = any(w in query_lower for w in unwanted)
+        if not wanted_override:
+            if any(w in title for w in unwanted):
+                score -= 3
+
+        return score
+
+    best = max(entries, key=_score)
+    logger.info(f"  [yt-dlp] using: {best.get('title', '?')!r}")
     return Track(
-        title=info.get("title", "Unknown title"),
-        stream_url=info["url"],
+        title=best.get("title", "Unknown title"),
+        stream_url=best["url"],
         requested_by=requested_by,
-        webpage_url=info.get("webpage_url", ""),
-        duration=info.get("duration"),
-        thumbnail=info.get("thumbnail"),
-        artist=info.get("uploader") or info.get("channel"),
+        webpage_url=best.get("webpage_url", ""),
+        duration=best.get("duration"),
+        thumbnail=best.get("thumbnail"),
+        artist=best.get("uploader") or best.get("channel"),
     )
 
 
@@ -630,7 +683,9 @@ def _extract_playlist(url: str, requested_by: str) -> list[Track]:
     return tracks
 
 async def _post_now_playing_for_track(player, track):
+    logger.info(f"[music] posting now playing for {track.title!r}")
     if not player.text_channel:
+        logger.warning("[music] text_channel is None — cannot post now playing")
         return
     from music.now_playing import post_now_playing
     await post_now_playing(

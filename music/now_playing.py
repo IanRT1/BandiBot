@@ -211,12 +211,19 @@ class NowPlayingView(discord.ui.View):
                 return
         else:
             if not self.message:
-                return
-            try:
-                await self.message.edit(attachments=[file], embed=embed, view=self)
-            except Exception as e:
-                logger.error(f"[now_playing] track change edit failed: {e}")
-                return
+                if not self.player.text_channel:
+                    return
+                try:
+                    self.message = await self.player.text_channel.send(file=file, embed=embed, view=self)
+                except Exception as e:
+                    logger.error(f"[now_playing] fresh post failed: {e}")
+                    return
+            else:
+                try:
+                    await self.message.edit(attachments=[file], embed=embed, view=self)
+                except Exception as e:
+                    logger.error(f"[now_playing] track change edit failed: {e}")
+                    return
 
         self.start_updates()
 
