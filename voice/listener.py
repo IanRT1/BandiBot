@@ -27,9 +27,7 @@ no pausing or restarting needed.
 
 
 import os
-import io
 import time
-import wave
 import asyncio
 import logging
 import warnings
@@ -45,6 +43,13 @@ from discord.ext import voice_recv
 from openwakeword.model import Model
 
 from silero_vad import load_silero_vad
+from voice.audio import (
+    mono48k_to_16k,
+    mono_to_stereo,
+    samples_to_wav_bytes,
+    stereo_to_mono,
+    to_float32,
+)
 
 logger = logging.getLogger(__name__)
 warnings.filterwarnings("ignore", message=".*tflite runtime.*")
@@ -79,35 +84,6 @@ SESSION_HISTORY_SIZE  = 10
 IDLE_TIMEOUT          = 600
 
 CLIP_BUFFER_SECONDS = 30
-
-# ── Audio helpers ─────────────────────────────────────────────────────────────
-
-def _stereo_to_mono(samples: np.ndarray) -> np.ndarray:
-    if len(samples) % 2 == 0:
-        left  = samples[0::2].astype(np.int32)
-        right = samples[1::2].astype(np.int32)
-        return ((left + right) >> 1).astype(np.int16)
-    return samples
-
-
-def _mono48k_to_16k(samples: np.ndarray) -> np.ndarray:
-    n = (len(samples) // 3) * 3
-    return samples[:n].reshape(-1, 3).mean(axis=1).astype(np.int16)
-
-
-def _to_float32(samples: np.ndarray) -> np.ndarray:
-    return samples.astype(np.float32) / 32768.0
-
-
-def _samples_to_wav_bytes(samples: np.ndarray, sample_rate: int = SOURCE_SAMPLE_RATE) -> bytes:
-    buf = io.BytesIO()
-    with wave.open(buf, 'wb') as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)
-        wf.setframerate(sample_rate)
-        wf.writeframes(samples.astype(np.int16).tobytes())
-    return buf.getvalue()
-
 
 # ── Per-user session history ──────────────────────────────────────────────────
 
@@ -191,16 +167,13 @@ class BandiBotSink(voice_recv.AudioSink):
             if not pcm:
                 return
             raw    = np.frombuffer(pcm, dtype=np.int16).copy()
-            mono48 = _stereo_to_mono(raw)
-            stereo = np.empty(len(mono48) * 2, dtype=np.int16)
-            stereo[0::2] = mono48
-            stereo[1::2] = mono48
-            self.gs.clip_buffer.append(stereo)
+            mono48 = stereo_to_mono(raw)
+            self.gs.clip_buffer.append(mono_to_stereo(mono48))
             uid    = user.id
             u      = self._get_user(uid)
 
             if u.state in ("idle", "processing"):
-                mono16 = _mono48k_to_16k(mono48)
+                mono16 = mono48k_to_16k(mono48)
                 self._feed_wakeword(uid, mono16, user, u)
             if u.state == "listening":
                 if uid == self._active_uid:
@@ -275,8 +248,8 @@ class BandiBotSink(voice_recv.AudioSink):
         if time.time() < u.vad_grace_until:
             return
 
-        mono16  = _mono48k_to_16k(mono48)
-        mono16f = _to_float32(mono16)
+        mono16  = mono48k_to_16k(mono48)
+        mono16f = to_float32(mono16)
         u.vad_buf = np.concatenate([u.vad_buf, mono16f])
 
         while len(u.vad_buf) >= VAD_CHUNK_SIZE:
@@ -317,7 +290,7 @@ class BandiBotSink(voice_recv.AudioSink):
             return
 
         logger.info(f"[voice] ← captured {duration:.2f}s | {u.total_speech_chunks} speech chunks | sending to STT")
-        wav = _samples_to_wav_bytes(all_samples)
+        wav = samples_to_wav_bytes(all_samples, SOURCE_SAMPLE_RATE)
         #with open("debug_capture.wav", "wb") as f:
         #    f.write(wav)
         asyncio.run_coroutine_threadsafe(

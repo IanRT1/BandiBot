@@ -4,9 +4,8 @@ music/player.py
 Voice + music playback for BandiBot.
 
 Per-guild state is held in VoiceManager (singleton via module-level instance).
-Tracks are resolved with yt-dlp (URL or search query), played via FFmpeg,
-and mixed via MixerSource so TTS can be injected over music without
-pausing or restarting.
+Tracks are resolved by music.resolver, played via FFmpeg, and mixed via
+MixerSource so TTS can be injected over music without pausing or restarting.
 
 Track resolution:
   Single tracks  → resolved immediately before queuing
@@ -33,31 +32,15 @@ import logging
 import time
 import random
 from collections import deque
-from dataclasses import dataclass, field
 from typing import Optional
 from discord.ext import voice_recv
 
 import discord
-import yt_dlp
+
+from music.resolver import extract_playlist, resolve_track
+from music.tracks import Track
 
 logger = logging.getLogger(__name__)
-
-_YDL_OPTS = {
-    "format": "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best[acodec!=none]/best",
-    "noplaylist": True,
-    "quiet": True,
-    "no_warnings": True,
-    "default_search": "ytsearch",
-    "source_address": "0.0.0.0",
-    "ignoreerrors": True,
-}
-
-_YDL_OPTS_FLAT = {
-    "quiet": True,
-    "no_warnings": True,
-    "extract_flat": True,
-    "ignoreerrors": True,
-}
 
 DEFAULT_VOLUME = 0.30
 
@@ -69,24 +52,6 @@ _FFMPEG_OPTS = (
 )
 
 _IDLE_TIMEOUT = 300
-
-
-@dataclass
-class Track:
-    title: str
-    stream_url: str
-    requested_by: str
-    webpage_url: str
-    duration: Optional[int] = None
-    thumbnail: Optional[str] = None
-    thumbnail_bytes: Optional[bytes] = None
-    artist: Optional[str] = None
-    started_at: float = field(default_factory=time.time)
-    paused_at: Optional[float] = None
-    total_paused: float = 0.0
-    resolved: bool = True
-    query: Optional[str] = None
-    error: Optional[str] = None
 
 
 class GuildPlayer:
@@ -176,7 +141,7 @@ class GuildPlayer:
             logger.info(f"[music] resolver: pre-resolving {next_unresolved.title!r}")
             try:
                 resolved = await asyncio.to_thread(
-                    _resolve_track, next_unresolved.query, next_unresolved.requested_by
+                    resolve_track, next_unresolved.query, next_unresolved.requested_by
                 )
                 next_unresolved.title = resolved.title
                 next_unresolved.stream_url = resolved.stream_url
@@ -198,59 +163,57 @@ class GuildPlayer:
             logger.error(f"[music] resolver loop error: {e}")
 
     def play_next(self):
-            """Pop the next track and start playing it via MixerSource."""
-            if not self.queue or not self.is_connected:
-                self.current = None
-                self._schedule_idle_check()
-                if self._now_playing_view:
-                    loop = self.voice_client.client.loop if self.voice_client else asyncio.get_event_loop()
-                    asyncio.run_coroutine_threadsafe(
-                        self._now_playing_view.on_queue_empty(),
-                        loop,
+        """Pop the next track and start playing it via MixerSource."""
+        if not self.queue or not self.is_connected:
+            self.current = None
+            self._schedule_idle_check()
+            if self._now_playing_view:
+                loop = self.voice_client.client.loop if self.voice_client else asyncio.get_event_loop()
+                asyncio.run_coroutine_threadsafe(
+                    self._now_playing_view.on_queue_empty(),
+                    loop,
+                )
+            return
+
+        track = self.queue.popleft()
+
+        if track.error:
+            logger.warning(f"[music] skipping errored track {track.title!r}: {track.error}")
+            loop = self.voice_client.client.loop
+            if self.text_channel:
+                asyncio.run_coroutine_threadsafe(
+                    self.text_channel.send(f"⚠️ Could not load **{track.title}** — skipping."),
+                    loop,
+                )
+            loop.call_soon_threadsafe(self.play_next)
+            return
+
+        if not track.resolved:
+            logger.info(f"[music] waiting for resolution of {track.title!r}")
+            loop = self.voice_client.client.loop
+
+            async def _wait_and_play():
+                try:
+                    resolved = await asyncio.to_thread(
+                        resolve_track, track.query, track.requested_by
                     )
-                return
+                    track.title = resolved.title
+                    track.stream_url = resolved.stream_url
+                    track.webpage_url = resolved.webpage_url
+                    track.duration = resolved.duration
+                    track.thumbnail = resolved.thumbnail
+                    track.artist = resolved.artist
+                    track.resolved = True
+                    track.error = None
+                except Exception as e:
+                    track.resolved = True
+                    track.error = str(e)
+                loop.call_soon_threadsafe(lambda: self._play_resolved(track))
 
-            track = self.queue.popleft()
+            asyncio.run_coroutine_threadsafe(_wait_and_play(), loop)
+            return
 
-            # If track has an error, notify and skip to next
-            if track.error:
-                logger.warning(f"[music] skipping errored track {track.title!r}: {track.error}")
-                loop = self.voice_client.client.loop
-                if self.text_channel:
-                    asyncio.run_coroutine_threadsafe(
-                        self.text_channel.send(f"⚠️ Could not load **{track.title}** — skipping."),
-                        loop,
-                    )
-                loop.call_soon_threadsafe(self.play_next)
-                return
-
-            # If track is not yet resolved, resolve it directly
-            if not track.resolved:
-                logger.info(f"[music] waiting for resolution of {track.title!r}")
-                loop = self.voice_client.client.loop
-
-                async def _wait_and_play():
-                    try:
-                        resolved = await asyncio.to_thread(
-                            _resolve_track, track.query, track.requested_by
-                        )
-                        track.title = resolved.title
-                        track.stream_url = resolved.stream_url
-                        track.webpage_url = resolved.webpage_url
-                        track.duration = resolved.duration
-                        track.thumbnail = resolved.thumbnail
-                        track.artist = resolved.artist
-                        track.resolved = True
-                        track.error = None
-                    except Exception as e:
-                        track.resolved = True
-                        track.error = str(e)
-                    loop.call_soon_threadsafe(lambda: self._play_resolved(track))
-
-                asyncio.run_coroutine_threadsafe(_wait_and_play(), loop)
-                return
-
-            self._play_resolved(track)
+        self._play_resolved(track)
 
     def _play_resolved(self, track: "Track"):
         """Actually start playing a resolved track."""
@@ -365,7 +328,7 @@ class VoiceManager:
         player = self.get_player(guild)
 
         try:
-            track = await asyncio.to_thread(_resolve_track, query, requester_member.display_name)
+            track = await asyncio.to_thread(resolve_track, query, requester_member.display_name)
         except Exception as e:
             logger.error(f"[music] resolve failed for {query!r}: {e}")
             return f"Could not resolve track: {e}"
@@ -426,7 +389,7 @@ class VoiceManager:
         player = self.get_player(guild)
 
         try:
-            entries = await asyncio.to_thread(_extract_playlist, url, requester_member.display_name)
+            entries = await asyncio.to_thread(extract_playlist, url, requester_member.display_name)
         except Exception as e:
             logger.error(f"[music] playlist extract failed for {url!r}: {e}")
             return f"Could not load playlist: {e}"
@@ -571,116 +534,6 @@ class VoiceManager:
         player.queue = deque(queue_list)
         return f"Removed '{track.title}' from the queue."
 
-
-def _resolve_track(query: str, requested_by: str) -> Track:
-    if query.startswith("http://") or query.startswith("https://"):
-        logger.info(f"  [yt-dlp] starting resolution for {query!r}")
-        t = time.time()
-        with yt_dlp.YoutubeDL(_YDL_OPTS) as ydl:
-            info = ydl.extract_info(query, download=False)
-        logger.info(f"  [yt-dlp] resolved in {time.time() - t:.2f}s")
-
-        if "entries" in info:
-            entry = next((e for e in info["entries"] if e), None)
-            if not entry:
-                raise Exception("No playable results found.")
-            info = entry
-
-        logger.info(f"  [yt-dlp] using: {info.get('title', '?')!r}")
-        return Track(
-            title=info.get("title", "Unknown title"),
-            stream_url=info["url"],
-            requested_by=requested_by,
-            webpage_url=info.get("webpage_url", ""),
-            duration=info.get("duration"),
-            thumbnail=info.get("thumbnail"),
-            artist=info.get("uploader") or info.get("channel"),
-        )
-
-    # Text search
-    query_lower = query.lower()
-    search_query = f"ytsearch5:{query}"
-    logger.info(f"  [yt-dlp] searching {search_query!r}")
-    t = time.time()
-
-    with yt_dlp.YoutubeDL(_YDL_OPTS) as ydl:
-        info = ydl.extract_info(search_query, download=False)
-    logger.info(f"  [yt-dlp] resolved in {time.time() - t:.2f}s")
-
-    entries = [e for e in info.get("entries", []) if e]
-    if not entries:
-        raise Exception("No playable results found.")
-
-    def _score(entry):
-        title = (entry.get("title") or "").lower()
-        duration = entry.get("duration") or 0
-        score = 0
-
-        if duration > 600:
-            score -= 2
-        if duration > 1200:
-            score -= 3
-
-        query_words = set(query_lower.split())
-        title_words = set(title.split())
-        score += len(query_words & title_words)
-
-        unwanted = ("reaction", "review", "full album", "commentary", "explained", "interview")
-        wanted_override = any(w in query_lower for w in unwanted)
-        if not wanted_override:
-            if any(w in title for w in unwanted):
-                score -= 3
-
-        return score
-
-    best = max(entries, key=_score)
-    logger.info(f"  [yt-dlp] using: {best.get('title', '?')!r}")
-    return Track(
-        title=best.get("title", "Unknown title"),
-        stream_url=best["url"],
-        requested_by=requested_by,
-        webpage_url=best.get("webpage_url", ""),
-        duration=best.get("duration"),
-        thumbnail=best.get("thumbnail"),
-        artist=best.get("uploader") or best.get("channel"),
-    )
-
-
-def _extract_playlist(url: str, requested_by: str) -> list[Track]:
-    """Extract playlist entries as unresolved placeholder tracks."""
-    # Normalize to pure playlist URL
-    if "list=" in url:
-        import re
-        match = re.search(r"list=([A-Za-z0-9_-]+)", url)
-        if match:
-            url = f"https://www.youtube.com/playlist?list={match.group(1)}"
-
-    logger.info(f"  [yt-dlp] extracting playlist {url!r}")
-    t = time.time()
-
-    with yt_dlp.YoutubeDL(_YDL_OPTS_FLAT) as ydl:
-        info = ydl.extract_info(url, download=False)
-
-    logger.info(f"  [yt-dlp] playlist extracted in {time.time() - t:.2f}s")
-
-    entries = info.get("entries", [])
-    tracks = []
-    for entry in entries:
-        if not entry:
-            continue
-        title = entry.get("title") or entry.get("id") or "Unknown"
-        entry_url = entry.get("url") or entry.get("webpage_url") or url
-        tracks.append(Track(
-            title=title,
-            stream_url="",
-            requested_by=requested_by,
-            webpage_url=entry_url,
-            resolved=False,
-            query=entry_url,
-        ))
-
-    logger.info(f"  [yt-dlp] found {len(tracks)} playlist entries")
-    return tracks
 
 async def _post_now_playing_for_track(player, track):
     logger.info(f"[music] posting now playing for {track.title!r}")

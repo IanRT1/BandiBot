@@ -1,268 +1,62 @@
 """
 voice/tts.py
 
-Text-to-speech and audio mixing for BandiBot using Deepgram Aura-2 or Kokoro.
+Text-to-speech orchestration for BandiBot.
 
-Two TTS providers are supported and switchable via TTS_PROVIDER in .env:
-  - deepgram (default) → cloud API, no local compute, requires DEEPGRAM_API_KEY
-  - kokoro             → local model, no API cost, requires espeak-ng installed
+This module chooses the configured TTS provider, routes generated PCM into the
+right Discord audio source, and handles cancellation. Provider-specific code
+lives in voice.tts_providers; low-level AudioSource buffering and music mixing
+live in voice.tts_sources.
 
-Two playback modes depending on whether music is active:
+Playback modes:
+  Mixer mode      -> inject TTS into MixerSource while music continues playing
+  Standalone mode -> play a dedicated StandaloneSource when no music is active
 
-  Mixer mode (music playing):
-    TTS is streamed as PCM and injected directly into the MixerSource
-    audio stream. Music volume is ducked during speech. No pausing or
-    restarting — both streams play simultaneously.
+Switching providers:
+  Change TTS_PROVIDER in core/config.py to "kokoro" or "deepgram". This is a
+  code config choice; secrets such as DEEPGRAM_API_KEY stay in the environment.
 
-  Standalone mode (no music):
-    TTS is played via a dedicated _StandaloneSource fed into the Discord
-    voice client directly. Fully cancellable via threading.Event.
-
-Classes:
-  MixerSource       → wraps a primary audio source, injects TTS on top
-  _StandaloneSource → standalone cancellable TTS source for silence mode
-
-Key functions:
-  speak()           → route TTS to mixer or standalone based on state
-  cancel_tts()      → immediately cancel any in-progress TTS
-  play_activation() → play wake word confirmation sound
-
-Cancellation:
-  Wake word interruptions cancel TTS mid-stream. MixerSource clears its
-  buffer and sets a cancelled flag. _StandaloneSource uses threading.Event
-  so cancellation works safely across asyncio and audio threads.
-
-Audio format:
-  Deepgram output: 48kHz, 16-bit signed, mono (linear16)
-  Kokoro output:   24kHz, float32, mono → resampled to 48kHz int16
-  Discord input:   48kHz, 16-bit signed, stereo
-  Conversion:      mono samples duplicated to both stereo channels
+Public API:
+  speak()           -> generate and play TTS for a connected voice client
+  cancel_tts()      -> cancel in-progress mixer or standalone TTS
+  play_activation() -> play the wake activation sound
+  MixerSource       -> re-exported for music.player compatibility
 """
 
-import os
-import time
 import asyncio
 import logging
-import threading
-import aiohttp
-import discord
-import numpy as np
+import os
+import time
+import wave
 
-from core.config import DEEPGRAM_API_KEY, TTS_PROVIDER
+import discord
+
+from core.config import TTS_PROVIDER
+from voice.tts_providers import (
+    KOKORO_CHUNK_SIZE,
+    generate_kokoro_pcm,
+    load_tts_provider,
+    stream_deepgram_pcm,
+)
+from voice.tts_sources import MixerSource, StandaloneSource
 
 logger = logging.getLogger(__name__)
 
-# ── Deepgram settings ─────────────────────────────────────────────────────────
-TTS_MODEL          = "aura-2-javier-es"
-TTS_SAMPLE_RATE    = 48000
-
-# ── Kokoro settings ───────────────────────────────────────────────────────────
-KOKORO_VOICE       = "ef_dora"   # Spanish female — change to any voice from VOICES.md
-KOKORO_LANG        = "e"         # 'e' = Spanish es
-KOKORO_SPEED       = 1.1
-KOKORO_SAMPLE_RATE = 24000
-KOKORO_CHUNK_SIZE  = 4096        # samples per feed chunk
-
-# ── Shared settings ───────────────────────────────────────────────────────────
-DISCORD_FRAME_SIZE = 3840
-MUSIC_DUCK_VOLUME  = 0.3
-
-# ── Kokoro pipeline ───────────────────────────────────────────────────────────
-_kokoro_pipeline = None
-
-if TTS_PROVIDER == "kokoro":
-    from kokoro import KPipeline
-    logger.info("[tts]  → loading Kokoro pipeline (this may take a moment on first run)...")
-    _kokoro_pipeline = KPipeline(lang_code=KOKORO_LANG)
-    logger.info("[tts]  → Kokoro pipeline ready")
-
-
-def _get_kokoro_pipeline():
-    return _kokoro_pipeline
-
-
-def _resample_24k_to_48k(audio: np.ndarray) -> np.ndarray:
-    """Resample float32 24kHz mono to int16 48kHz mono via linear interpolation."""
-    original_len = len(audio)
-    target_len = original_len * 2  # 48000 / 24000 = 2x
-    indices = np.linspace(0, original_len - 1, target_len)
-    resampled = np.interp(indices, np.arange(original_len), audio)
-    return (np.clip(resampled, -1.0, 1.0) * 32767).astype(np.int16)
-
-
-class MixerSource(discord.AudioSource):
-    """
-    Audio source that mixes a primary source (music) with an
-    optional secondary source (TTS).
-
-    Music plays continuously. TTS is injected on top when speak() is called.
-    Both are audible simultaneously — no pausing or restarting.
-    TTS can be cancelled mid-stream via cancel().
-    """
-
-    def __init__(self, primary: discord.AudioSource, clip_buffer=None):
-        self._primary      = primary
-        self._tts_buf      = bytearray()
-        self._tts_done     = False
-        self._tts_active   = False
-        self._cancelled    = False
-        self._lock         = threading.Lock()
-        self._tts_finished = threading.Event()
-        self._clip_buffer  = clip_buffer
-
-    def read(self) -> bytes:
-        music_frame = self._primary.read()
-        if not music_frame:
-            return b""
-
-        music = np.frombuffer(music_frame, dtype=np.int16).astype(np.int32)
-
-        with self._lock:
-            has_tts  = len(self._tts_buf) >= DISCORD_FRAME_SIZE
-            tts_done = self._tts_done and len(self._tts_buf) < DISCORD_FRAME_SIZE
-
-        if has_tts:
-            with self._lock:
-                tts_frame = bytes(self._tts_buf[:DISCORD_FRAME_SIZE])
-                del self._tts_buf[:DISCORD_FRAME_SIZE]
-            tts   = np.frombuffer(tts_frame, dtype=np.int16).astype(np.int32)
-            mixed = (music * MUSIC_DUCK_VOLUME).astype(np.int32) + tts
-            mixed = np.clip(mixed, -32768, 32767).astype(np.int16)
-            frame = mixed.tobytes()
-        elif tts_done and self._tts_active:
-            with self._lock:
-                self._tts_active = False
-                self._tts_done   = False
-                self._cancelled  = False
-            self._tts_finished.set()
-            frame = music_frame
-        else:
-            frame = music_frame
-
-        if self._clip_buffer is not None:
-            self._clip_buffer.append(np.frombuffer(frame, dtype=np.int16).copy())
-
-        return frame
-
-    def feed_tts(self, pcm_mono: bytes):
-        if not pcm_mono:
-            return
-        with self._lock:
-            if self._cancelled:
-                return
-        samples = np.frombuffer(pcm_mono, dtype=np.int16)
-        stereo  = np.empty(len(samples) * 2, dtype=np.int16)
-        stereo[0::2] = samples
-        stereo[1::2] = samples
-        with self._lock:
-            self._tts_active = True
-            self._tts_buf.extend(stereo.tobytes())
-
-    def finish_tts(self):
-        with self._lock:
-            self._tts_done = True
-
-    def cancel(self):
-        with self._lock:
-            self._tts_buf.clear()
-            self._tts_done   = True
-            self._cancelled  = True
-            self._tts_active = False
-        self._tts_finished.set()
-        logger.info("[tts]  ← cancelled (wake word interrupt)")
-
-    def reset_cancel(self):
-        with self._lock:
-            self._cancelled = False
-
-    def wait_tts_done(self, timeout: float = 30.0) -> bool:
-        return self._tts_finished.wait(timeout=timeout)
-
-
-class _StandaloneSource(discord.AudioSource):
-    """Standalone TTS source for when no music is playing. Cancellable."""
-
-    def __init__(self, clip_buffer=None):
-        self._buf          = bytearray()
-        self._lock         = threading.Lock()
-        self._done         = False
-        self._cancelled    = False
-        self._finished_evt = threading.Event()
-        self._clip_buffer  = clip_buffer
-
-    def feed(self, pcm_mono: bytes):
-        with self._lock:
-            if self._cancelled:
-                return
-        samples = np.frombuffer(pcm_mono, dtype=np.int16)
-        stereo  = np.empty(len(samples) * 2, dtype=np.int16)
-        stereo[0::2] = samples
-        stereo[1::2] = samples
-        with self._lock:
-            self._buf.extend(stereo.tobytes())
-
-    def cancel(self):
-        with self._lock:
-            self._buf.clear()
-            self._done      = True
-            self._cancelled = True
-        self._finished_evt.set()
-        logger.info("[tts]  ← standalone cancelled (wake word interrupt)")
-
-    def set_done(self):
-        with self._lock:
-            self._done = True
-
-    def is_cancelled(self) -> bool:
-        with self._lock:
-            return self._cancelled
-
-    def read(self) -> bytes:
-        with self._lock:
-            if len(self._buf) >= DISCORD_FRAME_SIZE:
-                data = bytes(self._buf[:DISCORD_FRAME_SIZE])
-                del self._buf[:DISCORD_FRAME_SIZE]
-            elif self._done:
-                if self._buf:
-                    data = bytes(self._buf).ljust(DISCORD_FRAME_SIZE, b'\x00')
-                    self._buf.clear()
-                else:
-                    logger.info("[tts]  → standalone source exhausted, returning empty")
-                    return b""
-            else:
-                return bytes(DISCORD_FRAME_SIZE)
-
-        if self._clip_buffer is not None:
-            self._clip_buffer.append(np.frombuffer(data, dtype=np.int16).copy())
-        return data
-
-    def _after_playback(self, error):
-        if error:
-            logger.error(f"[tts]  ✗ standalone playback error: {error}")
-        self._finished_evt.set()
-
-    def is_opus(self) -> bool:
-        return False
-
-    def cleanup(self):
-        pass
+load_tts_provider(TTS_PROVIDER)
 
 
 def cancel_tts(voice_client: discord.VoiceClient):
-    """
-    Cancel any in-progress TTS immediately.
-    Works for both MixerSource (music+TTS) and standalone TTS.
-    """
+    """Cancel any in-progress TTS immediately."""
     if not voice_client or not voice_client.is_connected():
         return
 
-    source = getattr(voice_client, 'source', None)
+    source = getattr(voice_client, "source", None)
     if isinstance(source, MixerSource):
         source.cancel()
         return
 
-    standalone = getattr(voice_client, '_standalone_tts', None)
-    if standalone is not None and isinstance(standalone, _StandaloneSource):
+    standalone = getattr(voice_client, "_standalone_tts", None)
+    if isinstance(standalone, StandaloneSource):
         standalone.cancel()
         voice_client._standalone_tts = None
         try:
@@ -283,274 +77,196 @@ async def speak(
         return
 
     t_start = time.perf_counter()
-    logger.info(f"[tts]  → speaking ({len(text)} chars) via {TTS_PROVIDER}")
+    logger.info(f"[tts]  -> speaking ({len(text)} chars) via {TTS_PROVIDER}")
 
-    source   = getattr(voice_client, 'source', None)
+    source = getattr(voice_client, "source", None)
     is_mixer = isinstance(source, MixerSource) and voice_client.is_playing()
 
-    if TTS_PROVIDER == "kokoro":
-        await _speak_kokoro(voice_client, text, t_start, is_mixer, source, clip_buffer=clip_buffer)
+    if is_mixer:
+        await _speak_mixer(source, text, t_start)
     else:
-        await _speak_deepgram(voice_client, text, t_start, is_mixer, source, clip_buffer=clip_buffer)
+        await _speak_standalone(voice_client, text, t_start, clip_buffer=clip_buffer)
 
 
-async def _speak_deepgram(
-    voice_client: discord.VoiceClient,
-    text: str,
-    t_start: float,
-    is_mixer: bool,
-    source,
-    clip_buffer=None,
-):
-    """Deepgram Aura-2 TTS path."""
-    if not is_mixer:
-        await _speak_standalone(voice_client, text, t_start, provider="deepgram", clip_buffer=clip_buffer)
-        return
-
-    mixer: MixerSource = source
+async def _speak_mixer(mixer: MixerSource, text: str, t_start: float):
     mixer.reset_cancel()
     mixer._tts_finished.clear()
-
-    url = (
-        f"https://api.deepgram.com/v1/speak"
-        f"?model={TTS_MODEL}&encoding=linear16"
-        f"&sample_rate={TTS_SAMPLE_RATE}&container=none&speed=1.3"
-    )
-    headers = {
-        "Authorization": f"Token {DEEPGRAM_API_KEY}",
-        "Content-Type": "application/json",
-    }
-
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, headers=headers, json={"text": text}) as resp:
-                if resp.status != 200:
-                    body = await resp.text()
-                    logger.error(f"[tts]  ✗ Deepgram {resp.status}: {body}")
-                    return
-
-                first_chunk = True
-                async for chunk in resp.content.iter_chunked(4096):
-                    with mixer._lock:
-                        cancelled = mixer._cancelled
-                    if cancelled:
-                        logger.info("[tts]  → stream cancelled mid-flight")
-                        return
-                    if chunk:
-                        if first_chunk:
-                            t_first = (time.perf_counter() - t_start) * 1000
-                            logger.info(f"[tts]  → first chunk in {t_first:.0f}ms")
-                            first_chunk = False
-                        mixer.feed_tts(chunk)
-
-        mixer.finish_tts()
-        logger.debug("[tts]  → all chunks streamed, waiting for playback")
-
-    except Exception as e:
-        logger.error(f"[tts]  ✗ streaming error: {e}")
-        mixer.finish_tts()
-        return
-
-    await asyncio.get_event_loop().run_in_executor(
-        None, lambda: mixer.wait_tts_done(timeout=30.0)
-    )
-
-    elapsed = (time.perf_counter() - t_start) * 1000
-    logger.info(f"[tts]  ← done ({elapsed:.0f}ms total)")
-
-
-async def _speak_kokoro(
-    voice_client: discord.VoiceClient,
-    text: str,
-    t_start: float,
-    is_mixer: bool,
-    source,
-    clip_buffer=None,
-):
-    """Kokoro local TTS path."""
-    if not is_mixer:
-        await _speak_standalone(voice_client, text, t_start, provider="kokoro", clip_buffer=clip_buffer)
-        return
-
-    mixer: MixerSource = source
-    mixer.reset_cancel()
-    mixer._tts_finished.clear()
-
-    def _generate():
-        pipeline = _get_kokoro_pipeline()
-        chunks = []
-        for _, _, audio in pipeline(text, voice=KOKORO_VOICE, speed=KOKORO_SPEED):
-            resampled = _resample_24k_to_48k(audio)
-            chunks.append(resampled.tobytes())
-        return chunks
 
     try:
         first_chunk = True
-        pcm_chunks = await asyncio.get_event_loop().run_in_executor(None, _generate)
-
-        for chunk_bytes in pcm_chunks:
+        async for chunk in _iter_provider_pcm(text):
             with mixer._lock:
                 cancelled = mixer._cancelled
             if cancelled:
-                logger.info("[tts]  → kokoro stream cancelled mid-flight")
+                logger.info("[tts]  -> stream cancelled mid-flight")
                 return
+
             if first_chunk:
-                t_first = (time.perf_counter() - t_start) * 1000
-                logger.info(f"[tts]  → first chunk in {t_first:.0f}ms")
+                _log_first_chunk(t_start)
                 first_chunk = False
-            for i in range(0, len(chunk_bytes), KOKORO_CHUNK_SIZE * 2):
-                mixer.feed_tts(chunk_bytes[i:i + KOKORO_CHUNK_SIZE * 2])
+
+            for feed_chunk in _iter_feed_chunks(chunk):
+                mixer.feed_tts(feed_chunk)
 
         mixer.finish_tts()
-        logger.debug("[tts]  → all chunks streamed, waiting for playback")
+        logger.debug("[tts]  -> all chunks streamed, waiting for playback")
 
     except Exception as e:
-        logger.error(f"[tts]  ✗ kokoro error: {e}")
+        logger.error(f"[tts]  x {TTS_PROVIDER} error: {e}")
         mixer.finish_tts()
         return
 
     await asyncio.get_event_loop().run_in_executor(
         None, lambda: mixer.wait_tts_done(timeout=30.0)
     )
-
-    elapsed = (time.perf_counter() - t_start) * 1000
-    logger.info(f"[tts]  ← done ({elapsed:.0f}ms total)")
+    _log_done(t_start)
 
 
 async def _speak_standalone(
     voice_client: discord.VoiceClient,
     text: str,
     t_start: float,
-    provider: str = "deepgram",
     clip_buffer=None,
 ):
-    source = _StandaloneSource(clip_buffer=clip_buffer)
+    source = StandaloneSource(clip_buffer=clip_buffer)
     voice_client._standalone_tts = source
 
-    logger.debug(f"[tts]  → standalone play | is_playing={voice_client.is_playing()} is_connected={voice_client.is_connected()} source={voice_client.source}")
+    logger.debug(
+        "[tts]  -> standalone play | "
+        f"is_playing={voice_client.is_playing()} "
+        f"is_connected={voice_client.is_connected()} "
+        f"source={voice_client.source}"
+    )
     try:
-        voice_client.play(source, after=source._after_playback)
-        logger.debug(f"[tts]  → standalone play succeeded")
+        voice_client.play(source, after=source.after_playback)
+        logger.debug("[tts]  -> standalone play succeeded")
     except Exception as e:
-        logger.error(f"[tts]  ✗ standalone play failed: {e}")
+        logger.error(f"[tts]  x standalone play failed: {e}")
         source.set_done()
+        voice_client._standalone_tts = None
         return
 
-    if provider == "kokoro":
-        def _generate():
-            pipeline = _get_kokoro_pipeline()
-            chunks = []
-            for _, _, audio in pipeline(text, voice=KOKORO_VOICE, speed=KOKORO_SPEED):
-                resampled = _resample_24k_to_48k(audio)
-                chunks.append(resampled.tobytes())
-            return chunks
-
+    try:
         try:
-            pcm_chunks = await asyncio.get_event_loop().run_in_executor(None, _generate)
             first_chunk = True
-            for chunk_bytes in pcm_chunks:
+            async for chunk in _iter_provider_pcm(text):
                 if source.is_cancelled():
-                    logger.info("[tts]  → kokoro standalone cancelled mid-flight")
+                    logger.info("[tts]  -> standalone stream cancelled mid-flight")
                     return
+
                 if first_chunk:
-                    t_first = (time.perf_counter() - t_start) * 1000
-                    logger.info(f"[tts]  → first chunk in {t_first:.0f}ms")
+                    _log_first_chunk(t_start)
                     first_chunk = False
-                for i in range(0, len(chunk_bytes), KOKORO_CHUNK_SIZE * 2):
-                    source.feed(chunk_bytes[i:i + KOKORO_CHUNK_SIZE * 2])
+
+                for feed_chunk in _iter_feed_chunks(chunk):
+                    source.feed(feed_chunk)
+
             source.set_done()
-            logger.info("[tts]  → all chunks streamed, waiting for playback")
+            logger.info("[tts]  -> all chunks streamed, waiting for playback")
+
         except asyncio.CancelledError:
             source.cancel()
             return
         except Exception as e:
-            logger.error(f"[tts]  ✗ kokoro standalone error: {e}")
+            logger.error(f"[tts]  x {TTS_PROVIDER} standalone error: {e}")
             source.set_done()
 
-    else:
-        url = (
-            f"https://api.deepgram.com/v1/speak"
-            f"?model={TTS_MODEL}&encoding=linear16"
-            f"&sample_rate={TTS_SAMPLE_RATE}&container=none&speed=1.3"
+        await asyncio.get_event_loop().run_in_executor(
+            None, lambda: source._finished_evt.wait(timeout=60.0)
         )
-        headers = {
-            "Authorization": f"Token {DEEPGRAM_API_KEY}",
-            "Content-Type": "application/json",
-        }
+        _log_done(t_start)
+    finally:
+        if getattr(voice_client, "_standalone_tts", None) is source:
+            voice_client._standalone_tts = None
 
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=headers, json={"text": text}) as resp:
-                    if resp.status != 200:
-                        source.set_done()
-                        return
-                    first_chunk = True
-                    async for chunk in resp.content.iter_chunked(4096):
-                        if source.is_cancelled():
-                            logger.info("[tts]  → standalone stream cancelled mid-flight")
-                            return
-                        if chunk:
-                            if first_chunk:
-                                t_first = (time.perf_counter() - t_start) * 1000
-                                logger.info(f"[tts]  → first chunk in {t_first:.0f}ms")
-                                first_chunk = False
-                            source.feed(chunk)
-            source.set_done()
-            logger.info("[tts]  → all chunks streamed, waiting for playback")
-        except asyncio.CancelledError:
-            source.cancel()
-            return
-        except Exception as e:
-            logger.error(f"[tts]  ✗ {e}")
-            source.set_done()
 
-    await asyncio.get_event_loop().run_in_executor(
-        None, lambda: source._finished_evt.wait(timeout=60.0)
-    )
+async def _iter_provider_pcm(text: str):
+    if TTS_PROVIDER == "deepgram":
+        async for chunk in stream_deepgram_pcm(text):
+            yield chunk
+        return
 
-    voice_client._standalone_tts = None
-    elapsed = (time.perf_counter() - t_start) * 1000
-    logger.info(f"[tts]  ← done ({elapsed:.0f}ms total)")
+    if TTS_PROVIDER == "kokoro":
+        chunks = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: generate_kokoro_pcm(text)
+        )
+        for chunk in chunks:
+            yield chunk
+        return
+
+    logger.error(f"[tts]  x unsupported TTS_PROVIDER: {TTS_PROVIDER!r}")
+
+
+def _iter_feed_chunks(chunk: bytes):
+    if TTS_PROVIDER != "kokoro":
+        yield chunk
+        return
+
+    chunk_size = KOKORO_CHUNK_SIZE * 2
+    for i in range(0, len(chunk), chunk_size):
+        yield chunk[i:i + chunk_size]
 
 
 async def play_activation(voice_client: discord.VoiceClient):
-    """Play wake activation sound. Mixes with music if playing."""
+    """Play wake activation sound, mixing with music when possible."""
     if not voice_client or not voice_client.is_connected():
         return
+
     wav_path = os.path.join(os.path.dirname(__file__), "..", "assets", "wake_activation.wav")
     if not os.path.exists(wav_path):
-        logger.warning("[tts]  ✗ wake_activation.wav not found")
+        logger.warning("[tts]  x wake_activation.wav not found")
         return
 
-    source = getattr(voice_client, 'source', None)
+    source = getattr(voice_client, "source", None)
     if isinstance(source, MixerSource) and voice_client.is_playing():
-        import wave as wave_mod
-        try:
-            with wave_mod.open(wav_path, 'rb') as wf:
-                pcm = wf.readframes(wf.getnframes())
-            source.reset_cancel()
-            source._tts_finished.clear()
-            chunk_size = 4096
-            for i in range(0, len(pcm), chunk_size):
-                source.feed_tts(pcm[i:i + chunk_size])
-            source.finish_tts()
-            await asyncio.get_event_loop().run_in_executor(
-                None, lambda: source.wait_tts_done(timeout=10.0)
-            )
-        except Exception as e:
-            logger.error(f"[tts]  ✗ activation error: {e}")
+        await _play_activation_mixed(source, wav_path)
     else:
-        if voice_client.is_playing():
-            voice_client.stop_playing()
-            await asyncio.sleep(0.2)
-        done = asyncio.Event()
-        def _after(error):
-            done.set()
-        try:
-            voice_client.play(discord.FFmpegPCMAudio(wav_path), after=_after)
-            await done.wait()
-        except Exception as e:
-            logger.error(f"[tts]  ✗ activation play failed: {e}")
-            done.set()
+        await _play_activation_standalone(voice_client, wav_path)
 
-    logger.info("[tts]  ← activation sound done")
+    logger.info("[tts]  <- activation sound done")
+
+
+async def _play_activation_mixed(source: MixerSource, wav_path: str):
+    try:
+        with wave.open(wav_path, "rb") as wf:
+            pcm = wf.readframes(wf.getnframes())
+
+        source.reset_cancel()
+        source._tts_finished.clear()
+        for i in range(0, len(pcm), 4096):
+            source.feed_tts(pcm[i:i + 4096])
+        source.finish_tts()
+        await asyncio.get_event_loop().run_in_executor(
+            None, lambda: source.wait_tts_done(timeout=10.0)
+        )
+    except Exception as e:
+        logger.error(f"[tts]  x activation error: {e}")
+
+
+async def _play_activation_standalone(voice_client: discord.VoiceClient, wav_path: str):
+    if voice_client.is_playing():
+        voice_client.stop_playing()
+        await asyncio.sleep(0.2)
+
+    done = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def _after(error):
+        loop.call_soon_threadsafe(done.set)
+
+    try:
+        voice_client.play(discord.FFmpegPCMAudio(wav_path), after=_after)
+        await done.wait()
+    except Exception as e:
+        logger.error(f"[tts]  x activation play failed: {e}")
+        done.set()
+
+
+def _log_first_chunk(t_start: float):
+    t_first = (time.perf_counter() - t_start) * 1000
+    logger.info(f"[tts]  -> first chunk in {t_first:.0f}ms")
+
+
+def _log_done(t_start: float):
+    elapsed = (time.perf_counter() - t_start) * 1000
+    logger.info(f"[tts]  <- done ({elapsed:.0f}ms total)")

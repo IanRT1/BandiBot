@@ -24,23 +24,20 @@ Music commands:
   pipeline knows to skip TTS entirely.
 
 _FakeMsgProxy:
-  A minimal stand-in for discord.Message that lets _execute_tool_call()
-  in handlers.py operate identically whether called from text or voice.
+  A minimal stand-in for discord.Message that lets execute_tool_call()
+  in bot/tool_executor.py operate identically whether called from text or voice.
 """
-
-import logging
 import json
 import time
+import logging
 
 import discord
 
+from bot.tool_schemas import ALL_TOOLS
+from bot.handlers import build_instruction
+from bot.openai_client import send_to_openai
+from bot.tool_executor import execute_tool_call, is_music_tool
 from bot.utils import clean_username, get_current_pst_time, get_current_pst_date
-from bot.openai_client import send_to_openai, ALL_TOOLS
-from bot.handlers import (
-    build_instruction,
-    _execute_tool_call,
-    _is_music_tool,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +69,7 @@ def _build_voice_context(member: discord.Member, guild: discord.Guild) -> str:
         f"- Interaction Mode: Voice\n"
         f"{vc_line}"
     )
+
 
 class _FakeMsgProxy:
     def __init__(self, guild: discord.Guild, member: discord.Member):
@@ -136,7 +134,7 @@ async def handle_voice_command(
 
     if tool_calls:
         proxy = _FakeMsgProxy(guild, member)
-        called_music = any(_is_music_tool(tc["name"]) for tc in tool_calls)
+        called_music = any(is_music_tool(tc["name"]) for tc in tool_calls)
         should_leave = any(tc["name"] == "leave_voice" for tc in tool_calls)
 
         messages.append({
@@ -156,7 +154,7 @@ async def handle_voice_command(
         })
 
         for tc in tool_calls:
-            result = await _execute_tool_call(tc, proxy)
+            result = await execute_tool_call(tc, proxy)
             messages.append({
                 "role": "tool",
                 "tool_call_id": tc["id"],

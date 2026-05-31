@@ -29,8 +29,11 @@ if not DEEPGRAM_API_KEY:
     raise RuntimeError("DEEPGRAM_API_KEY is not set in .env")
 
 # ── TTS Provider ──────────────────────────────────────────────
+# Code-level operational choice, not a secret.
 # Options: "deepgram" | "kokoro"
 TTS_PROVIDER: str = "kokoro"
+if TTS_PROVIDER not in {"deepgram", "kokoro"}:
+    raise RuntimeError("TTS_PROVIDER must be either 'deepgram' or 'kokoro'")
 
 # ── Logging ───────────────────────────────────────────────────
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "DEBUG").upper()
