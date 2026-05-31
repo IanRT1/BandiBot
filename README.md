@@ -37,6 +37,7 @@ Every instance is independently hosted by the user. There is no central server, 
 - **Text-to-speech** via Kokoro by default, with a Deepgram Aura-2 path available in code; speech is mixed directly into the music stream at PCM level so music never pauses
 - **Mid-speech interruption** — trigger the wake word while the bot is speaking to immediately cancel and start a new command
 - **Per-user isolation** — only the user who triggered the wake word has their audio captured; other speakers are ignored
+- **Voice music feedback** — voice-detected song requests post the heard query first, then replace that same message with the final queued or now-playing result
 
 ### Music
 - **YouTube playback** via yt-dlp and FFmpeg with loudness normalization
@@ -65,10 +66,11 @@ Discord Gateway
       ├── on_message (@mention)
       │         └── bot/handlers.py
       │                   ├── LLM (bot/openai_client.py)
-      │                   └── Tool execution (_execute_tool_call)
+      │                   ├── Tool schemas (bot/tool_schemas.py)
+      │                   └── Tool execution (bot/tool_executor.py)
       │                             ├── music/player.py (VoiceManager)
-      │                             ├── voice/listener.py
-      │                             └── bot/handlers.py (server info, member activity)
+      │                             ├── voice/listener.py / voice/clips.py
+      │                             └── bot/handlers.py + bot/utils.py (server context)
       │
       └── on_voice_state_update
                 └── voice/listener.py (GuildVoiceSession)
@@ -77,7 +79,9 @@ Discord Gateway
                           │         └── VAD (Silero)
                           ├── voice/stt.py (Deepgram Nova-3)
                           ├── voice/handler.py (LLM + tool calls)
-                          └── voice/tts.py (Kokoro / Deepgram Aura-2 → MixerSource)
+                          └── voice/tts.py (TTS orchestration)
+                                    ├── voice/tts_providers.py (Kokoro / Deepgram Aura-2)
+                                    ├── voice/tts_sources.py (MixerSource / StandaloneSource)
                                     └── music/player.py (FFmpeg → MixerSource → Discord)
 ```
 
@@ -90,6 +94,8 @@ Discord Gateway
 **Interruption system across async and audio threads** — wake word detection runs on the audio thread. When it fires mid-TTS, `cancel_tts()` immediately clears the TTS buffer, and `_interrupt_current()` cancels the asyncio pipeline task. Music commands are exempt from cancellation and always run to completion.
 
 **Per-user state machines** — each user in the voice channel has independent wake word detection, VAD state, and capture buffers. Packet loss or bad audio from one user does not affect others.
+
+**Music starts voice listening** — when a text command makes the bot join voice for music playback, `music/player.py` explicitly starts the wake-word listener on the same voice client. The Discord voice-state event also starts listening, and the listener manager de-duplicates repeated starts.
 
 ---
 
@@ -252,17 +258,26 @@ BandiBot/
 ├── voice/
 │   ├── listener.py         # Wake word, VAD, STT, TTS pipeline per guild
 │   ├── handler.py          # Voice command LLM bridge, _FakeMsgProxy
+│   ├── audio.py            # Stateless PCM conversion helpers
+│   ├── clips.py            # Last-30-seconds voice clip export
 │   ├── stt.py              # Deepgram STT wrapper
-│   └── tts.py              # Kokoro / Deepgram TTS, MixerSource, audio mixing
+│   ├── tts.py              # TTS orchestration, cancellation, activation sound
+│   ├── tts_providers.py    # Kokoro and Deepgram TTS provider adapters
+│   └── tts_sources.py      # MixerSource and StandaloneSource audio sources
 │
 ├── music/
-│   ├── player.py           # Music queue, yt-dlp resolution, FFmpeg playback
+│   ├── player.py           # Music queue, guild playback state, FFmpeg playback
+│   ├── resolver.py         # yt-dlp search, URL resolution, playlist extraction
+│   ├── tracks.py           # Shared Track model
+│   ├── attachments.py      # Uploaded audio ingestion and metadata extraction
 │   ├── now_playing.py      # Now Playing embed, button controls, live timer
 │   └── banner.py           # Banner image generation (thumbnail + text overlay)
 │
 ├── bot/
-│   ├── handlers.py         # Text command handling, LLM context, tool execution
-│   ├── openai_client.py    # OpenAI SDK wrapper, tool definitions
+│   ├── handlers.py         # Text command handling, LLM context, replies
+│   ├── openai_client.py    # OpenAI SDK wrapper
+│   ├── tool_schemas.py     # OpenAI tool definitions
+│   ├── tool_executor.py    # Shared text/voice tool execution
 │   └── utils.py            # Shared utilities, member presence, time formatting
 │
 ├── assets/
@@ -303,9 +318,11 @@ Replace `assets/BandiBot.onnx` with any openWakeWord-compatible ONNX model. Upda
 
 The current provider is selected by `TTS_PROVIDER` in `core/config.py`. The default is `kokoro`.
 
-For Kokoro, change `KOKORO_VOICE`, `KOKORO_LANG`, and `KOKORO_SPEED` in `voice/tts.py`.
+For Kokoro, change `KOKORO_VOICE`, `KOKORO_LANG`, and `KOKORO_SPEED` in `voice/tts_providers.py`.
 
-For Deepgram, change `TTS_MODEL` in `voice/tts.py` to any [Deepgram Aura-2 voice](https://developers.deepgram.com/docs/tts-models). The current Deepgram model constant is `aura-2-javier-es` (Spanish male).
+For Deepgram, change `TTS_MODEL` in `voice/tts_providers.py` to any [Deepgram Aura-2 voice](https://developers.deepgram.com/docs/tts-models). The current Deepgram model constant is `aura-2-javier-es` (Spanish male).
+
+Low-level Discord audio buffering lives in `voice/tts_sources.py`. Provider output conversion, including Kokoro's 24kHz float32 to 48kHz int16 PCM conversion, routes through helpers in `voice/audio.py`.
 
 ### STT Language
 
@@ -313,7 +330,7 @@ Change the `language` field in `voice/stt.py` `_OPTIONS` to any [Deepgram-suppor
 
 ### Music Volume
 
-Adjust `DEFAULT_VOLUME` in `music/player.py` (0.0–1.0) and `MUSIC_DUCK_VOLUME` in `voice/tts.py` (volume multiplier applied to music while TTS is speaking).
+Adjust `DEFAULT_VOLUME` in `music/player.py` (0.0–1.0) and `MUSIC_DUCK_VOLUME` in `voice/tts_sources.py` (volume multiplier applied to music while TTS is speaking).
 
 ### Hidden Voice Channels
 
