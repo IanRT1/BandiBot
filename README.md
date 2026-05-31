@@ -326,7 +326,7 @@ Low-level Discord audio buffering lives in `voice/tts_sources.py`. Provider outp
 
 ### STT Language
 
-Change the `language` field in `voice/stt.py` `_OPTIONS` to any [Deepgram-supported language code](https://developers.deepgram.com/docs/languages).
+The default STT language is `multi` in `voice/stt.py`, which supports English/Spanish code-switching better than pinning recognition to only `es`. Change `STT_LANGUAGE` to any [Deepgram-supported language code](https://developers.deepgram.com/docs/languages) if you want to force one language.
 
 ### Music Volume
 
