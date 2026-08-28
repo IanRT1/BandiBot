@@ -35,5 +35,10 @@ TTS_PROVIDER: str = "kokoro"
 if TTS_PROVIDER not in {"deepgram", "kokoro"}:
     raise RuntimeError("TTS_PROVIDER must be either 'deepgram' or 'kokoro'")
 
+# ── YouTube / yt-dlp ─────────────────────────────────────────
+# Optional JavaScript challenge solver settings for modern YouTube extraction.
+YOUTUBE_JS_RUNTIME: str = os.getenv("YOUTUBE_JS_RUNTIME", "").strip()
+YOUTUBE_REMOTE_COMPONENTS: str = os.getenv("YOUTUBE_REMOTE_COMPONENTS", "").strip()
+
 # ── Logging ───────────────────────────────────────────────────
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "DEBUG").upper()

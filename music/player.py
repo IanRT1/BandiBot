@@ -31,6 +31,7 @@ import asyncio
 import logging
 import time
 import random
+import subprocess
 from collections import deque
 from typing import Optional
 from discord.ext import voice_recv
@@ -50,8 +51,77 @@ _FFMPEG_BEFORE = (
 _FFMPEG_OPTS = (
     "-vn -af loudnorm=I=-16:TP=-1.5:LRA=11"
 )
+_FFMPEG_BLOCKED_HEADER_KEYS = {"authorization"}
 
 _IDLE_TIMEOUT = 300
+_RESOLVE_TIMEOUT = 35
+_STREAM_REFRESH_AFTER = 90
+
+
+async def _resolve_track_async(
+    query: str,
+    requested_by: str,
+    exclude_webpage_urls: set[str] | None = None,
+) -> Track:
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(resolve_track, query, requested_by, exclude_webpage_urls),
+            timeout=_RESOLVE_TIMEOUT,
+        )
+    except asyncio.TimeoutError as exc:
+        logger.error(f"[music] resolve timed out after {_RESOLVE_TIMEOUT}s for {query!r}")
+        raise TimeoutError("YouTube search timed out.") from exc
+
+
+def _copy_resolved_track(target: Track, resolved: Track):
+    target.title = resolved.title
+    target.stream_url = resolved.stream_url
+    target.webpage_url = resolved.webpage_url
+    target.duration = resolved.duration
+    target.thumbnail = resolved.thumbnail
+    target.thumbnail_bytes = resolved.thumbnail_bytes
+    target.artist = resolved.artist
+    target.http_headers = dict(resolved.http_headers)
+    target.resolved = True
+    target.resolved_at = time.time()
+    target.query = resolved.query or target.query
+    target.error = None
+
+
+def _ffmpeg_before_options(track: Track) -> str:
+    headers = getattr(track, "http_headers", None) or {}
+    header_lines = [
+        f"{key}: {value}"
+        for key, value in headers.items()
+        if value and key.lower() not in _FFMPEG_BLOCKED_HEADER_KEYS
+    ]
+    if not header_lines:
+        return _FFMPEG_BEFORE
+
+    header_blob = "\r\n".join(header_lines) + "\r\n"
+    header_blob = header_blob.replace('"', r'\"')
+    return f'{_FFMPEG_BEFORE} -headers "{header_blob}"'
+
+
+def _read_ffmpeg_stderr(ffmpeg_source) -> str:
+    process = getattr(ffmpeg_source, "_process", None)
+    stderr = getattr(process, "stderr", None)
+    if not stderr:
+        return ""
+
+    try:
+        raw = stderr.read()
+    except Exception as exc:
+        return f"<failed to read ffmpeg stderr: {exc}>"
+
+    if not raw:
+        return ""
+
+    text = raw.decode("utf-8", errors="replace")
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(lines) > 12:
+        lines = lines[-12:]
+    return " | ".join(lines)
 
 
 class GuildPlayer:
@@ -63,6 +133,7 @@ class GuildPlayer:
         self.voice_client: Optional[discord.VoiceClient] = None
         self._idle_task: Optional[asyncio.Task] = None
         self._resolver_task: Optional[asyncio.Task] = None
+        self._start_when_free_task: Optional[asyncio.Task] = None
         self.now_playing_message = None
         self._now_playing_view = None
         self._natural_transition = False
@@ -77,7 +148,11 @@ class GuildPlayer:
 
     @property
     def is_playing(self) -> bool:
-        return self.is_connected and self.voice_client.is_playing()
+        return (
+            self.is_connected
+            and self.current is not None
+            and self.voice_client.is_playing()
+        )
 
     @property
     def elapsed_seconds(self) -> float:
@@ -110,15 +185,47 @@ class GuildPlayer:
         if self._resolver_task:
             self._resolver_task.cancel()
             self._resolver_task = None
-        if self._now_playing_view:
-            await self._now_playing_view.stop_updates()
-            self._now_playing_view = None
+        if self._start_when_free_task:
+            self._start_when_free_task.cancel()
+            self._start_when_free_task = None
+        await self._clear_now_playing_messages()
         if self.is_connected:
             await self.voice_client.disconnect()
         self.voice_client = None
         self.current = None
         self.queue.clear()
         self.now_playing_message = None
+
+    async def _clear_now_playing_messages(self):
+        """Delete playback UI when the player leaves voice or is torn down."""
+        view = self._now_playing_view
+        if view:
+            await view.stop_updates()
+
+        messages = []
+        if view and view.message:
+            messages.append(view.message)
+        if self.now_playing_message and self.now_playing_message not in messages:
+            messages.append(self.now_playing_message)
+        if self.queue_empty_message and self.queue_empty_message not in messages:
+            messages.append(self.queue_empty_message)
+
+        for msg in messages:
+            try:
+                await msg.delete()
+            except discord.NotFound:
+                pass
+            except Exception as e:
+                logger.error(f"[now_playing] failed to delete playback UI during disconnect: {e}")
+
+        if messages:
+            logger.info("[now_playing] cleared playback UI during disconnect")
+
+        if view:
+            view.message = None
+        self._now_playing_view = None
+        self.now_playing_message = None
+        self.queue_empty_message = None
 
     async def _ensure_voice_listener(self, voice_channel: discord.VoiceChannel):
         """Start wake-word listening after a music-driven voice connection."""
@@ -158,17 +265,10 @@ class GuildPlayer:
 
             logger.info(f"[music] resolver: pre-resolving {next_unresolved.title!r}")
             try:
-                resolved = await asyncio.to_thread(
-                    resolve_track, next_unresolved.query, next_unresolved.requested_by
+                resolved = await _resolve_track_async(
+                    next_unresolved.query, next_unresolved.requested_by
                 )
-                next_unresolved.title = resolved.title
-                next_unresolved.stream_url = resolved.stream_url
-                next_unresolved.webpage_url = resolved.webpage_url
-                next_unresolved.duration = resolved.duration
-                next_unresolved.thumbnail = resolved.thumbnail
-                next_unresolved.artist = resolved.artist
-                next_unresolved.resolved = True
-                next_unresolved.error = None
+                _copy_resolved_track(next_unresolved, resolved)
                 logger.info(f"[music] resolver: resolved → {resolved.title!r}")
             except Exception as e:
                 next_unresolved.resolved = True
@@ -193,6 +293,10 @@ class GuildPlayer:
                 )
             return
 
+        if self._voice_busy_without_music():
+            self._schedule_start_when_free()
+            return
+
         track = self.queue.popleft()
 
         if track.error:
@@ -206,23 +310,20 @@ class GuildPlayer:
             loop.call_soon_threadsafe(self.play_next)
             return
 
-        if not track.resolved:
+        if not track.resolved or self._needs_stream_refresh(track):
+            if track.resolved:
+                age = time.time() - track.resolved_at
+                logger.info(f"[music] refreshing stale stream for {track.title!r} age={age:.0f}s")
             logger.info(f"[music] waiting for resolution of {track.title!r}")
             loop = self.voice_client.client.loop
 
             async def _wait_and_play():
                 try:
-                    resolved = await asyncio.to_thread(
-                        resolve_track, track.query, track.requested_by
+                    refresh_query = track.query or track.webpage_url or track.title
+                    resolved = await _resolve_track_async(
+                        refresh_query, track.requested_by
                     )
-                    track.title = resolved.title
-                    track.stream_url = resolved.stream_url
-                    track.webpage_url = resolved.webpage_url
-                    track.duration = resolved.duration
-                    track.thumbnail = resolved.thumbnail
-                    track.artist = resolved.artist
-                    track.resolved = True
-                    track.error = None
+                    _copy_resolved_track(track, resolved)
                 except Exception as e:
                     track.resolved = True
                     track.error = str(e)
@@ -232,6 +333,48 @@ class GuildPlayer:
             return
 
         self._play_resolved(track)
+
+    def _voice_busy_without_music(self) -> bool:
+        return (
+            self.is_connected
+            and self.current is None
+            and self.voice_client.is_playing()
+        )
+
+    def _schedule_start_when_free(self):
+        if self._start_when_free_task and not self._start_when_free_task.done():
+            return
+        logger.info("[music] voice client busy with standalone audio; music will start when free")
+        loop = self.voice_client.client.loop if self.voice_client else asyncio.get_event_loop()
+        self._start_when_free_task = loop.create_task(self._start_when_free())
+
+    async def _start_when_free(self):
+        try:
+            deadline = time.time() + 30
+            while (
+                self.queue
+                and self.is_connected
+                and self.current is None
+                and self.voice_client.is_playing()
+                and time.time() < deadline
+            ):
+                await asyncio.sleep(0.2)
+
+            if self.queue and self.is_connected and self.current is None:
+                logger.info("[music] standalone audio finished; starting queued music")
+                self.play_next()
+        except asyncio.CancelledError:
+            pass
+        finally:
+            if self._start_when_free_task is asyncio.current_task():
+                self._start_when_free_task = None
+
+    def _needs_stream_refresh(self, track: Track) -> bool:
+        if not track.resolved or not track.stream_url:
+            return False
+        if not (track.query or track.webpage_url):
+            return False
+        return time.time() - track.resolved_at >= _STREAM_REFRESH_AFTER
 
     def _play_resolved(self, track: "Track"):
         """Actually start playing a resolved track."""
@@ -260,8 +403,9 @@ class GuildPlayer:
 
         ffmpeg_source = discord.FFmpegPCMAudio(
             track.stream_url,
-            before_options=_FFMPEG_BEFORE,
+            before_options=_ffmpeg_before_options(track),
             options=_FFMPEG_OPTS,
+            stderr=subprocess.PIPE,
         )
         volume_source = discord.PCMVolumeTransformer(ffmpeg_source, volume=DEFAULT_VOLUME)
         mixer_source  = MixerSource(volume_source, clip_buffer=clip_buffer)
@@ -269,8 +413,62 @@ class GuildPlayer:
         loop = self.voice_client.client.loop
 
         def _after(error):
+            finished_track = self.current
+            elapsed = self.elapsed_seconds if finished_track else 0.0
+            stderr_text = _read_ffmpeg_stderr(ffmpeg_source)
             if error:
                 logger.error(f"Playback error in {self.guild.name}: {error}")
+            if stderr_text:
+                logger.warning(
+                    "[music] ffmpeg stderr for %r: %s",
+                    finished_track.title if finished_track else "?",
+                    stderr_text,
+                )
+            if finished_track and elapsed < 5 and (finished_track.duration or 0) > 30:
+                logger.warning(
+                    "[music] track ended after %.1fs despite duration=%s: %r",
+                    elapsed,
+                    finished_track.duration,
+                    finished_track.title,
+                )
+                if finished_track.playback_failures < 1 and (finished_track.query or finished_track.webpage_url):
+                    finished_track.playback_failures += 1
+                    logger.info(f"[music] refreshing and retrying early-ended track: {finished_track.title!r}")
+
+                    async def _refresh_and_retry():
+                        try:
+                            refresh_query = finished_track.query or finished_track.webpage_url
+                            excluded_urls = {finished_track.webpage_url} if finished_track.webpage_url else set()
+                            resolved = await _resolve_track_async(
+                                refresh_query,
+                                finished_track.requested_by,
+                                exclude_webpage_urls=excluded_urls,
+                            )
+                            _copy_resolved_track(finished_track, resolved)
+                        except Exception as exc:
+                            finished_track.resolved = True
+                            finished_track.error = str(exc)
+                            logger.error(f"[music] retry refresh failed for {finished_track.title!r}: {exc}")
+
+                        if self.current is finished_track:
+                            self.current = None
+                            self.queue.appendleft(finished_track)
+                            self.play_next()
+                            return
+
+                        if self.current or self.voice_client.is_playing():
+                            logger.info(
+                                "[music] retry ready for %r, but another track is active; re-queueing",
+                                finished_track.title,
+                            )
+                            self.queue.appendleft(finished_track)
+                            return
+
+                        self.queue.appendleft(finished_track)
+                        self.play_next()
+
+                    asyncio.run_coroutine_threadsafe(_refresh_and_retry(), loop)
+                    return
 
             if self._loop and self.current:
                 self.queue.appendleft(self.current)
@@ -345,13 +543,13 @@ class VoiceManager:
         voice_channel = requester_member.voice.channel
         player = self.get_player(guild)
 
-        try:
-            track = await asyncio.to_thread(resolve_track, query, requester_member.display_name)
-        except Exception as e:
-            logger.error(f"[music] resolve failed for {query!r}: {e}")
-            return f"Could not resolve track: {e}"
-
         async with self._get_play_lock(guild.id):
+            try:
+                track = await _resolve_track_async(query, requester_member.display_name)
+            except Exception as e:
+                logger.error(f"[music] resolve failed for {query!r}: {e}")
+                return f"Could not resolve track: {e}"
+
             await player.connect(voice_channel)
             player.queue.append(track)
 
@@ -562,6 +760,7 @@ async def _post_now_playing_for_track(player, track):
     await post_now_playing(
         player.text_channel,
         player,
+        current_track=track,
         title=track.title,
         artist=track.artist,
         duration_seconds=track.duration,

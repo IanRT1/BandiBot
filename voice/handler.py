@@ -29,6 +29,7 @@ _FakeMsgProxy:
 """
 import json
 import time
+import asyncio
 import logging
 
 import discord
@@ -40,6 +41,36 @@ from bot.tool_executor import execute_tool_call, is_music_tool
 from bot.utils import clean_username, get_current_pst_time, get_current_pst_date
 
 logger = logging.getLogger(__name__)
+
+_BACKGROUND_PLAYBACK_TASKS: set[asyncio.Task] = set()
+
+
+def _log_background_tool_result(task: asyncio.Task, tool_name: str):
+    try:
+        result = task.result()
+        logger.info(f"[voice] background {tool_name} completed after interrupt: {result}")
+    except asyncio.CancelledError:
+        logger.info(f"[voice] background {tool_name} was cancelled")
+    except Exception as e:
+        logger.error(f"[voice] background {tool_name} failed after interrupt: {e}")
+    finally:
+        _BACKGROUND_PLAYBACK_TASKS.discard(task)
+
+
+async def _execute_playback_tool(tool_call, proxy):
+    """Let voice-triggered playback actions finish even if the voice pipeline is interrupted."""
+    tool_name = tool_call["name"]
+    task = asyncio.create_task(execute_tool_call(tool_call, proxy))
+    _BACKGROUND_PLAYBACK_TASKS.add(task)
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        logger.info(f"[voice] {tool_name} continuing in background after interrupt")
+        task.add_done_callback(lambda t: _log_background_tool_result(t, tool_name))
+        raise
+    finally:
+        if task.done():
+            _BACKGROUND_PLAYBACK_TASKS.discard(task)
 
 
 def _build_voice_context(member: discord.Member, guild: discord.Guild) -> str:
@@ -72,9 +103,10 @@ def _build_voice_context(member: discord.Member, guild: discord.Guild) -> str:
 
 
 class _FakeMsgProxy:
-    def __init__(self, guild: discord.Guild, member: discord.Member):
+    def __init__(self, guild: discord.Guild, member: discord.Member, content: str = ""):
         self.guild = guild
         self.author = member
+        self.content = content
         from music.player import voice_manager
         player = voice_manager.get_player(guild)
         self.channel = player.text_channel  
@@ -105,6 +137,12 @@ async def handle_voice_command(
             "No markdown and no emojies. Spanish or English only. "
             "The conversation history below is PAST CONTEXT ONLY. "
             "IGNORE previous music requests. Only act on the CURRENT COMMAND at the end."
+            "For music requests, clean the spoken command into a good YouTube search query: remove command words, "
+            "keep title/artist/version clues, and fix obvious STT confusions only when the intent is clear. "
+            "If the user gives a plausible title plus artist, preserve it literally and do not replace it with a more famous song by that artist. "
+            "Command-like words inside a requested song title are not control commands. "
+            "Only stop or clear music when the current command explicitly asks to stop playback or clear the queue. "
+            "If the user provides a YouTube video ID, pass that exact ID unchanged. "
             "If the user asks you to leave, craft a goodbye message before leaving according to the context and history of conversation."
         )},
     ]
@@ -133,7 +171,7 @@ async def handle_voice_command(
     should_leave = False
 
     if tool_calls:
-        proxy = _FakeMsgProxy(guild, member)
+        proxy = _FakeMsgProxy(guild, member, text)
         called_music = any(is_music_tool(tc["name"]) for tc in tool_calls)
         should_leave = any(tc["name"] == "leave_voice" for tc in tool_calls)
 
@@ -154,7 +192,10 @@ async def handle_voice_command(
         })
 
         for tc in tool_calls:
-            result = await execute_tool_call(tc, proxy)
+            if is_music_tool(tc["name"]):
+                result = await _execute_playback_tool(tc, proxy)
+            else:
+                result = await execute_tool_call(tc, proxy)
             messages.append({
                 "role": "tool",
                 "tool_call_id": tc["id"],

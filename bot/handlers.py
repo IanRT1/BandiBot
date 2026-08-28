@@ -169,7 +169,12 @@ async def handle_bot_mention(message, client):
 
     async with message.channel.typing():
         t_prep = time.perf_counter()
-        history_messages = await fetch_recent_messages(message.channel, client, limit=20)
+        history_messages = await fetch_recent_messages(
+            message.channel,
+            client,
+            limit=20,
+            exclude_message_id=message.id,
+        )
         prep_ms = (time.perf_counter() - t_prep) * 1000
 
         logger.info(f"  prep took {prep_ms:.0f}ms")
@@ -180,17 +185,39 @@ async def handle_bot_mention(message, client):
             message.guild.name,
         )
 
+        past_history = [
+            {
+                "role": msg["role"],
+                "content": f"[PAST] {msg['content']}",
+            }
+            for msg in history_messages
+        ]
+
         messages = [
             {"role": "system", "content": instruction},
             {"role": "system", "content": context_info},
-            *history_messages,
-            {"role": "user", "content": f"[{user_name}] {user_message}"},
+            {"role": "system", "content": (
+                "The channel history below is PAST CONTEXT ONLY. "
+                "For tool calls, especially music tools, act only on the CURRENT MESSAGE at the end. "
+                "Never play, queue, skip, delete, or move music based on a past message. "
+                "For music requests, clean only the CURRENT MESSAGE into the YouTube search query. "
+                "If the user gives a plausible title plus artist, preserve it literally and do not replace it with a more famous song by that artist. "
+                "Command-like words inside a requested song title are not control commands. "
+                "Only stop or clear music when the current message explicitly asks to stop playback or clear the queue. "
+                "If the user provides a YouTube video ID, pass that exact ID unchanged."
+            )},
+            *past_history,
         ]
 
         player = voice_manager.get_player(message.guild)
         if player.current or player.queue:
             queue_str = await voice_manager.get_queue(message.guild)
             messages.append({"role": "system", "content": f"**Current Queue:**\n{queue_str}\n\nDo NOT re-queue any song already in this list."})
+
+        messages.extend([
+            {"role": "system", "content": "━━━ CURRENT MESSAGE BELOW — ACT ON THIS ONLY ━━━"},
+            {"role": "user", "content": f"[{user_name}] {user_message}"},
+        ])
 
         t_llm = time.perf_counter()
         response_data = await send_to_openai(
@@ -306,7 +333,7 @@ async def handle_bot_mention(message, client):
     )
 
 
-async def fetch_recent_messages(channel, client, limit=20):
+async def fetch_recent_messages(channel, client, limit=20, exclude_message_id=None):
     messages = [msg async for msg in channel.history(limit=limit)]
     messages.reverse()
 
@@ -321,6 +348,8 @@ async def fetch_recent_messages(channel, client, limit=20):
 
     history = []
     for msg in messages:
+        if exclude_message_id is not None and msg.id == exclude_message_id:
+            continue
         if not msg.content:
             continue
 

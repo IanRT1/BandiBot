@@ -19,8 +19,17 @@ MUSIC_TOOLS = [
             "name": "play_music",
             "description": (
                 "Play a single song or audio in the user's current voice channel. "
-                "Pass the user's exact words as the query — do NOT interpret, translate, or try to guess the correct song title. "
-                "Accepts either a YouTube URL or a free-text search query. "
+                "Reason about the user's request and pass a clean YouTube search query, not the raw command. "
+                "Remove command words such as play, queue, put on, pon, reproduce, or add. "
+                "Keep the song title, artist, featured artist, version/remix/live/remaster clues, and album clues when useful. "
+                "If the user gives a plausible song title plus artist, preserve those words literally. "
+                "Song titles can contain command-like words such as stop, pause, play, skip, or start from scratch; "
+                "when the user says play/pon/reproduce plus those words, treat them as the requested title. "
+                "Do not substitute a more famous song by the same artist. "
+                "If the user provides a YouTube video ID, pass that exact ID unchanged. "
+                "Correct obvious speech-to-text confusions only when the intended song is clear from context, but do not invent a different song. "
+                "Accepts either a YouTube URL or a cleaned free-text search query. "
+                "For YouTube radio links like watch?v=...&list=RD... or start_radio=1, play the video URL as a single song. "
                 "If something is already playing, the new track is added to the queue. "
                 "Use this whenever the user asks to play or queue a SINGLE song."
             ),
@@ -29,7 +38,12 @@ MUSIC_TOOLS = [
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "The user's exact words as the search query. Do not interpret or modify.",
+                        "description": (
+                            "Cleaned YouTube search query containing only the likely title/artist/version terms. "
+                            "Do not include wake words, user names, or command verbs. "
+                            "When unsure, prefer the literal requested title and artist over a guessed catalog match. "
+                            "A bare 11-character YouTube video ID must be passed exactly as written."
+                        ),
                     }
                 },
                 "required": ["query"],
@@ -45,6 +59,7 @@ MUSIC_TOOLS = [
                 "provides a list of songs, or pastes a YouTube playlist URL. "
                 "For text lists, each item becomes a separate search query. "
                 "For a YouTube playlist URL, pass it as the single item in the list. "
+                "Do not use this for YouTube radio links with list=RD... or start_radio=1; those are single-video play_music requests. "
                 "ONLY include songs explicitly requested in the CURRENT message. "
                 "Do NOT include songs from previous messages or that are already playing."
             ),
@@ -99,6 +114,8 @@ MUSIC_TOOLS = [
             "name": "delete_track",
             "description": (
                 "Remove one or more songs from the queue without affecting playback. "
+                "Use ONLY when the user explicitly asks to remove, delete, clear, drop, or take a track out of the queue. "
+                "Do NOT use for a bare song title or artist mention; bare song requests should usually be play_music. "
                 "Can reference tracks by position number(s), by name/partial name, "
                 "or by recency. Does NOT affect the currently playing track."
             ),
@@ -170,7 +187,12 @@ MUSIC_TOOLS = [
         "type": "function",
         "function": {
             "name": "stop_music",
-            "description": "Stop playback and clear the entire queue. Bot stays in the voice channel.",
+            "description": (
+                "Stop playback and clear the entire queue. Bot stays in the voice channel. "
+                "Use ONLY when the CURRENT message explicitly asks to stop playback, stop music, or clear the queue. "
+                "Do NOT use for a play request whose title contains command-like words, "
+                "such as 'play start from scratch the game'."
+            ),
             "parameters": {"type": "object", "properties": {}},
         },
     },

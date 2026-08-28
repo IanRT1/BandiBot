@@ -79,15 +79,27 @@ def _fit_next_track(title: str) -> str:
         truncated = candidate
     return truncated
 
+
+def _banner_filename(track_or_title) -> str:
+    """Return a stable-but-unique filename so Discord clients refresh edited banners."""
+    if hasattr(track_or_title, "started_at"):
+        token = f"{track_or_title.title}-{track_or_title.started_at}"
+    else:
+        token = str(track_or_title)
+    safe = "".join(ch if ch.isalnum() else "_" for ch in token.lower()).strip("_")
+    return f"now_playing_{safe[-48:] or 'track'}.png"
+
+
 def _build_playing_embed(
     queue_size: int,
     requested_by: str,
     duration_str: str = "0:00 / —:—",
     next_track: Optional[str] = None,
+    image_filename: str = "now_playing.png",
 ) -> discord.Embed:
     embed = discord.Embed(color=EMBED_COLOR)
     embed.set_author(name="✦  Now Playing")
-    embed.set_image(url="attachment://now_playing.png")
+    embed.set_image(url=f"attachment://{image_filename}")
     next_line = f"\n⏭ Up next: {_fit_next_track(next_track)}" if next_track else ""
     embed.set_footer(
         text=f"⏱ {duration_str}                                 🎵 {queue_size} in queue{next_line}\n👤 Requested by {requested_by}"
@@ -121,6 +133,7 @@ class NowPlayingView(discord.ui.View):
         self.player = player
         self.message: Optional[discord.Message] = None
         self._timer_task: Optional[asyncio.Task] = None
+        self._image_filename = "now_playing.png"
 
     def start_updates(self):
         if self._timer_task:
@@ -154,6 +167,7 @@ class NowPlayingView(discord.ui.View):
                         requested_by=track.requested_by,
                         duration_str=duration_str,
                         next_track=next_track,
+                        image_filename=self._image_filename,
                     )
                     await self.message.edit(embed=embed)
                 except discord.NotFound:
@@ -166,6 +180,12 @@ class NowPlayingView(discord.ui.View):
 
     async def on_track_changed(self, track, queue_size: int):
         """New track started — delete and repost if natural transition, edit in place if manual."""
+        await self.stop_updates()
+
+        if self.player.current is not track:
+            logger.info(f"[now_playing] skipped stale banner update for {track.title!r}")
+            return
+
         # Delete any lingering queue finished messages
         if self.player.queue_empty_message:
             try:
@@ -187,25 +207,37 @@ class NowPlayingView(discord.ui.View):
             logger.error(f"[now_playing] banner regen failed: {e}")
             return
 
+        if self.player.current is not track:
+            logger.info(f"[now_playing] skipped stale banner post for {track.title!r}")
+            return
+
         duration_str = f"0:00 / {_format_duration(track.duration)}"
         next_track = self.player.queue[0].title if self.player.queue else None
+        image_filename = _banner_filename(track)
         embed = _build_playing_embed(
             queue_size=queue_size,
             requested_by=track.requested_by,
             duration_str=duration_str,
             next_track=next_track,
+            image_filename=image_filename,
         )
-        file = discord.File(fp=io.BytesIO(png_bytes), filename="now_playing.png")
+        file = discord.File(fp=io.BytesIO(png_bytes), filename=image_filename)
 
         if natural and self.message:
+            if self.player.current is not track:
+                logger.info(f"[now_playing] skipped stale banner repost for {track.title!r}")
+                return
             channel = self.message.channel
             try:
                 await self.message.delete()
             except Exception:
                 pass
             self.message = None
+            self.player.now_playing_message = None
             try:
                 self.message = await channel.send(file=file, embed=embed, view=self)
+                self.player.now_playing_message = self.message
+                self._image_filename = image_filename
             except Exception as e:
                 logger.error(f"[now_playing] repost failed: {e}")
                 return
@@ -213,14 +245,40 @@ class NowPlayingView(discord.ui.View):
             if not self.message:
                 if not self.player.text_channel:
                     return
+                if self.player.current is not track:
+                    logger.info(f"[now_playing] skipped stale fresh banner post for {track.title!r}")
+                    return
                 try:
                     self.message = await self.player.text_channel.send(file=file, embed=embed, view=self)
+                    self.player.now_playing_message = self.message
+                    self._image_filename = image_filename
                 except Exception as e:
                     logger.error(f"[now_playing] fresh post failed: {e}")
                     return
             else:
+                if self.player.current is not track:
+                    logger.info(f"[now_playing] skipped stale banner edit for {track.title!r}")
+                    return
                 try:
                     await self.message.edit(attachments=[file], embed=embed, view=self)
+                    self._image_filename = image_filename
+                    self.player.now_playing_message = self.message
+                except discord.NotFound:
+                    logger.warning("[now_playing] message disappeared before track edit; reposting")
+                    self.message = None
+                    self.player.now_playing_message = None
+                    if not self.player.text_channel:
+                        return
+                    if self.player.current is not track:
+                        logger.info(f"[now_playing] skipped stale missing-message repost for {track.title!r}")
+                        return
+                    try:
+                        self.message = await self.player.text_channel.send(file=file, embed=embed, view=self)
+                        self.player.now_playing_message = self.message
+                        self._image_filename = image_filename
+                    except Exception as e:
+                        logger.error(f"[now_playing] repost after missing message failed: {e}")
+                        return
                 except Exception as e:
                     logger.error(f"[now_playing] track change edit failed: {e}")
                     return
@@ -231,6 +289,9 @@ class NowPlayingView(discord.ui.View):
         """Queue exhausted — delete the now playing message and post a plain queue-finished embed."""
         await self.stop_updates()
 
+        if not self.message and self.player.now_playing_message:
+            self.message = self.player.now_playing_message
+
         if not self.message:
             return
 
@@ -240,6 +301,8 @@ class NowPlayingView(discord.ui.View):
         except Exception:
             pass
         self.message = None
+        self.player.now_playing_message = None
+        logger.info("[now_playing] cleared now playing banner; queue empty")
 
         try:
             msg = await channel.send(embed=_build_empty_embed())
@@ -282,6 +345,7 @@ class NowPlayingView(discord.ui.View):
             except Exception:
                 pass
             self.message = None
+            self.player.now_playing_message = None
         await voice_manager.stop(self.guild)
         await interaction.response.defer()
 
@@ -320,6 +384,7 @@ async def post_now_playing(
     channel: discord.TextChannel,
     player,
     *,
+    current_track=None,
     title: str,
     artist: Optional[str],
     duration_seconds: Optional[int],
@@ -328,30 +393,59 @@ async def post_now_playing(
     thumbnail_url: Optional[str] = None,
     thumbnail_bytes: Optional[bytes] = None, 
 ) -> Optional["NowPlayingView"]:
+    if current_track is not None and player.current is not current_track:
+        logger.info(f"[now_playing] skipped stale initial banner for {title!r}")
+        return None
+
     try:
         png_bytes = await generate_banner(title, artist, thumbnail_url, thumbnail_bytes)  # ← pass through
     except Exception as e:
         logger.error(f"[now_playing] banner generation failed: {e}")
         return None
 
+    if current_track is not None and player.current is not current_track:
+        logger.info(f"[now_playing] skipped stale initial banner post for {title!r}")
+        return None
+
     duration_str = f"0:00 / {_format_duration(duration_seconds)}"
-    file = discord.File(fp=io.BytesIO(png_bytes), filename="now_playing.png")
+    image_filename = _banner_filename(title)
+    file = discord.File(fp=io.BytesIO(png_bytes), filename=image_filename)
     next_track = player.queue[0].title if player.queue else None
     embed = _build_playing_embed(
         queue_size=queue_size,
         requested_by=requested_by,
         duration_str=duration_str,
         next_track=next_track,
+        image_filename=image_filename,
     )
     view = NowPlayingView(channel.guild, player)
 
     try:
+        if current_track is not None and player.current is not current_track:
+            logger.info(f"[now_playing] skipped stale initial banner send for {title!r}")
+            return None
+        old_view = getattr(player, "_now_playing_view", None)
+        old_messages = []
+        if old_view:
+            await old_view.stop_updates()
+            if old_view.message:
+                old_messages.append(old_view.message)
+        if player.now_playing_message and player.now_playing_message not in old_messages:
+            old_messages.append(player.now_playing_message)
+        for old_message in old_messages:
+            try:
+                await old_message.delete()
+            except discord.NotFound:
+                pass
+            except Exception as e:
+                logger.error(f"[now_playing] failed to delete old banner before initial post: {e}")
         message = await channel.send(file=file, embed=embed, view=view)
     except Exception as e:
         logger.error(f"[now_playing] failed to post: {e}")
         return None
 
     view.message = message
+    view._image_filename = image_filename
     view.start_updates()
     player._now_playing_view = view
     player.now_playing_message = message
@@ -361,6 +455,10 @@ async def post_now_playing(
 
 async def update_now_playing_queue(player, queue_size: int):
     msg = player.now_playing_message
+    view = getattr(player, "_now_playing_view", None)
+    if (not msg) and view and view.message:
+        msg = view.message
+        player.now_playing_message = msg
     if not msg or not player.current:
         return
 
@@ -374,6 +472,7 @@ async def update_now_playing_queue(player, queue_size: int):
             requested_by=track.requested_by,
             duration_str=duration_str,
             next_track=next_track,
+            image_filename=getattr(view, "_image_filename", "now_playing.png"),
         )
         await msg.edit(embed=embed)
     except Exception as e:

@@ -40,9 +40,12 @@ class Track:
     thumbnail: Optional[str] = None
     thumbnail_bytes: Optional[bytes] = None
     artist: Optional[str] = None
+    http_headers: dict[str, str] = field(default_factory=dict)
     started_at: float = field(default_factory=time.time)
     paused_at: Optional[float] = None
     total_paused: float = 0.0
     resolved: bool = True
+    resolved_at: float = field(default_factory=time.time)
     query: Optional[str] = None
     error: Optional[str] = None
+    playback_failures: int = 0

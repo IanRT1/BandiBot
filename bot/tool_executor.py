@@ -23,6 +23,7 @@ Boundary:
 
 import asyncio
 import logging
+import re
 from collections import deque
 
 from music.player import voice_manager
@@ -69,11 +70,18 @@ async def execute_tool_call(tool_call, message):
                 if search_msg:
                     try:
                         await search_msg.edit(
-                            content=f"Heard: *{query}*\nTook too long to resolve that track."
+                            content="Took too long to resolve that track."
                         )
                     except Exception:
                         pass
                 return "Took too long to resolve that track. Try again."
+            except asyncio.CancelledError:
+                if search_msg:
+                    try:
+                        await search_msg.delete()
+                    except Exception:
+                        pass
+                raise
 
             if search_msg:
                 try:
@@ -81,8 +89,7 @@ async def execute_tool_call(tool_call, message):
                         track_title = result.split(": ", 1)[1] if ": " in result else result
                         await search_msg.edit(content=f"Queued: **{track_title}**")
                     elif result.startswith("Now playing:"):
-                        track_title = result.split(": ", 1)[1] if ": " in result else result
-                        await search_msg.edit(content=f"Now playing: **{track_title}**")
+                        await search_msg.delete()
                     else:
                         await search_msg.edit(content=result)
                 except Exception:
@@ -122,6 +129,14 @@ async def execute_tool_call(tool_call, message):
         if name == "resume_music":
             return await voice_manager.resume(guild)
         if name == "stop_music":
+            if not _has_explicit_stop_intent(message):
+                logger.warning(
+                    "  stop_music blocked: message did not explicitly ask to stop or clear music"
+                )
+                return (
+                    "Stop cancelled: the message did not explicitly ask to stop music "
+                    "or clear the queue."
+                )
             return await voice_manager.stop(guild)
         if name == "leave_voice":
             player = voice_manager.get_player(guild)
@@ -149,6 +164,9 @@ async def execute_tool_call(tool_call, message):
                 await message.channel.send(result)
             return result
         if name == "delete_track":
+            if not _has_explicit_delete_intent(message):
+                return "Delete cancelled: the message did not explicitly ask to remove a track."
+
             player = voice_manager.get_player(guild)
             queue_list = list(player.queue)
 
@@ -213,3 +231,52 @@ async def execute_tool_call(tool_call, message):
 
 def _is_voice_proxy(message) -> bool:
     return message.__class__.__name__ == "_FakeMsgProxy"
+
+
+def _has_explicit_delete_intent(message) -> bool:
+    content = getattr(message, "content", "")
+    if not content:
+        return True
+    lowered = content.lower()
+    delete_words = (
+        "remove", "delete", "clear", "drop", "take out", "take off",
+        "quita", "quitar", "borra", "borrar", "elimina", "eliminar",
+        "saca", "sacar",
+    )
+    return any(word in lowered for word in delete_words)
+
+
+def _has_explicit_stop_intent(message) -> bool:
+    content = getattr(message, "content", "")
+    if not content:
+        return False
+
+    lowered = content.lower()
+    starts_as_play_request = re.match(
+        r"^\s*(?:<@!?\d+>\s*)?"
+        r"(?:play|queue|add|put on|pon|poner|reproduce|toca)\b",
+        lowered,
+    )
+    if starts_as_play_request:
+        return False
+
+    stop_patterns = (
+        r"\bstop\b",
+        r"\bstop\s+(?:music|playback|playing|the song|the queue)\b",
+        r"\bclear\s+(?:the\s+)?queue\b",
+        r"\bclear\s+(?:all\s+)?music\b",
+        r"\bempty\s+(?:the\s+)?queue\b",
+        r"\bturn\s+off\s+(?:the\s+)?music\b",
+        r"\bshut\s+up\b",
+        r"\bstfu\b",
+        r"\bpara\b",
+        r"\bparen\b",
+        r"\bdeten(?:er|te|lo|la)?\b",
+        r"\bcancela(?:r)?\b",
+        r"\blimpia\s+(?:la\s+)?cola\b",
+        r"\bvac[ií]a\s+(?:la\s+)?cola\b",
+        r"\bborra\s+(?:la\s+)?cola\b",
+        r"\bquita\s+todo\b",
+        r"\bapaga\s+(?:la\s+)?m[uú]sica\b",
+    )
+    return any(re.search(pattern, lowered) for pattern in stop_patterns)

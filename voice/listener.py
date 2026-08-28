@@ -15,7 +15,8 @@ State machine (per user):
 Interruption support:
   Any user can trigger wake word at any time, even if the bot is speaking.
   When a new wake word fires mid-TTS, the current TTS is cancelled immediately
-  and the new user takes over.
+  and the new user takes over. The same user can also re-trigger while their
+  previous TTS response is playing.
 
 Crypto error recovery:
   Discord DAVE encryption key rotation can corrupt the receive pipeline.
@@ -27,9 +28,11 @@ no pausing or restarting needed.
 
 
 import os
+import re
 import time
 import asyncio
 import logging
+import threading
 import warnings
 
 from typing import Optional
@@ -84,6 +87,145 @@ SESSION_HISTORY_SIZE  = 10
 IDLE_TIMEOUT          = 600
 
 CLIP_BUFFER_SECONDS = 30
+CLIP_FRAME_SECONDS = 0.02
+CLIP_FRAME_SAMPLES = int(SOURCE_SAMPLE_RATE * CLIP_FRAME_SECONDS) * 2
+CLIP_BUFFER_FRAMES = int(CLIP_BUFFER_SECONDS / CLIP_FRAME_SECONDS)
+CLIP_PLAYBACK_SOURCE_ID = -1
+CLIP_TARGET_RMS = 0.075
+CLIP_SPEECH_RMS_FLOOR = 0.008
+CLIP_MAX_GAIN = 3.2
+CLIP_MIN_GAIN = 0.5
+CLIP_RMS_SMOOTHING = 0.12
+
+_PLAYBACK_COMMAND_RE = re.compile(
+    r"\b("
+    r"play|queue|add|put\s+on|"
+    r"pon|ponme|reproduce|toca|"
+    r"skip|next|pause|resume|stop"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_playback_command(text: str) -> bool:
+    return bool(_PLAYBACK_COMMAND_RE.search(text or ""))
+
+
+class RollingClipBuffer:
+    """Timestamped 48kHz stereo clip timeline.
+
+    Discord receive callbacks arrive per user, and playback callbacks arrive
+    from a separate audio thread. This buffer writes each frame into the 20ms
+    wall-clock slot where it arrived, so export means "the last 30 seconds" by
+    time instead of "the last N packets" or a backlog being drained later.
+    """
+
+    def __init__(self):
+        self._frames: dict[int, np.ndarray] = {}
+        self._last_source_slot: dict[int, int] = {}
+        self._source_rms: dict[int, float] = {}
+        self._lock = threading.Lock()
+
+    def start(self):
+        pass
+
+    def stop(self):
+        pass
+
+    def add_voice_frame(self, source_id: int, frame: np.ndarray):
+        self._write_frame(source_id, frame)
+
+    def append(self, frame: np.ndarray):
+        self._write_frame(CLIP_PLAYBACK_SOURCE_ID, frame)
+
+    def _write_frame(self, source_id: int, frame: np.ndarray):
+        normalized = self._normalize_frame(frame)
+        now_slot = self._current_slot()
+
+        with self._lock:
+            if source_id != CLIP_PLAYBACK_SOURCE_ID:
+                normalized = self._level_voice_frame_locked(source_id, normalized)
+
+            last_slot = self._last_source_slot.get(source_id)
+            slot = now_slot
+            if last_slot is not None and last_slot >= now_slot:
+                slot = last_slot + 1
+
+            # If a source bursts far ahead, collapse back to real time instead
+            # of dragging old audio into future clips.
+            if slot > now_slot + 2:
+                slot = now_slot
+
+            existing = self._frames.get(slot)
+            if existing is None:
+                self._frames[slot] = normalized
+            else:
+                mixed = existing.astype(np.int32) + normalized.astype(np.int32)
+                self._frames[slot] = np.clip(mixed, -32768, 32767).astype(np.int16)
+
+            self._last_source_slot[source_id] = slot
+            self._prune_locked(now_slot)
+
+    def _level_voice_frame_locked(self, source_id: int, frame: np.ndarray) -> np.ndarray:
+        samples = frame.astype(np.float32) / 32768.0
+        rms = float(np.sqrt(np.mean(samples * samples)))
+
+        if rms < CLIP_SPEECH_RMS_FLOOR:
+            return frame
+
+        previous = self._source_rms.get(source_id, rms)
+        smoothed = (
+            previous * (1.0 - CLIP_RMS_SMOOTHING)
+            + rms * CLIP_RMS_SMOOTHING
+        )
+        self._source_rms[source_id] = smoothed
+
+        gain = CLIP_TARGET_RMS / max(smoothed, 1e-6)
+        gain = max(CLIP_MIN_GAIN, min(CLIP_MAX_GAIN, gain))
+
+        leveled = np.clip(samples * gain, -1.0, 1.0)
+        return (leveled * 32767).astype(np.int16)
+
+    def to_pcm(self, seconds: int = CLIP_BUFFER_SECONDS) -> bytes:
+        frame_count = int(seconds / CLIP_FRAME_SECONDS)
+        current_slot = self._current_slot()
+        start_slot = current_slot - frame_count + 1
+
+        with self._lock:
+            frames = [
+                self._frames.get(slot, np.zeros(CLIP_FRAME_SAMPLES, dtype=np.int16))
+                for slot in range(start_slot, current_slot + 1)
+            ]
+
+        return np.concatenate(frames).astype(np.int16).tobytes()
+
+    @staticmethod
+    def _current_slot() -> int:
+        return int(time.monotonic() / CLIP_FRAME_SECONDS)
+
+    def _prune_locked(self, current_slot: int):
+        oldest_slot = current_slot - CLIP_BUFFER_FRAMES - 5
+        stale_slots = [slot for slot in self._frames if slot < oldest_slot]
+        for slot in stale_slots:
+            self._frames.pop(slot, None)
+
+        stale_sources = [
+            source_id
+            for source_id, slot in self._last_source_slot.items()
+            if slot < oldest_slot
+        ]
+        for source_id in stale_sources:
+            self._last_source_slot.pop(source_id, None)
+            self._source_rms.pop(source_id, None)
+
+    @staticmethod
+    def _normalize_frame(frame: np.ndarray) -> np.ndarray:
+        samples = np.asarray(frame, dtype=np.int16).reshape(-1)
+        if len(samples) >= CLIP_FRAME_SAMPLES:
+            return samples[:CLIP_FRAME_SAMPLES].copy()
+        padded = np.zeros(CLIP_FRAME_SAMPLES, dtype=np.int16)
+        padded[:len(samples)] = samples
+        return padded
 
 # ── Per-user session history ──────────────────────────────────────────────────
 
@@ -168,8 +310,8 @@ class BandiBotSink(voice_recv.AudioSink):
                 return
             raw    = np.frombuffer(pcm, dtype=np.int16).copy()
             mono48 = stereo_to_mono(raw)
-            self.gs.clip_buffer.append(mono_to_stereo(mono48))
             uid    = user.id
+            self.gs.clip_buffer.add_voice_frame(uid, mono_to_stereo(mono48))
             u      = self._get_user(uid)
 
             if u.state in ("idle", "processing"):
@@ -214,8 +356,30 @@ class BandiBotSink(voice_recv.AudioSink):
             #logger.debug(f"[ww] uid={uid} raw={raw_score:.5f} avg={avg:.5f} hits={hits}/{SMOOTHING_WINDOW}")
 
             if hits >= HITS_REQUIRED and avg >= WAKEWORD_THRESHOLD:
+                processing_interrupt = False
+                if u.state == "processing":
+                    if not self.gs.can_interrupt_processing(uid):
+                        self._oww_buf[uid] = np.array([], dtype=np.int16)
+                        self._score_buf[uid].clear()
+                        oww.reset()
+                        logger.info(
+                            f"[voice] ── ignored duplicate wake word for {user.display_name}; command already processing ──"
+                        )
+                        break
+
+                    processing_interrupt = True
+                    u.interrupted = True
+                    self.gs._interrupted_pipeline_uids.add(uid)
+                    logger.info(
+                        f"[voice] ── interrupting uid={uid} for repeated wake word during TTS ──"
+                    )
+                    asyncio.run_coroutine_threadsafe(
+                        self.gs._interrupt_current(), self.gs.loop
+                    )
+                    u.reset()
+
                 elapsed = time.time() - self.gs._last_wake_word
-                if elapsed < WAKEWORD_COOLDOWN:
+                if not processing_interrupt and elapsed < WAKEWORD_COOLDOWN:
                     break
 
                 self.gs._last_wake_word = time.time()
@@ -228,6 +392,7 @@ class BandiBotSink(voice_recv.AudioSink):
                     prev_u = self._get_user(prev_uid)
                     if prev_u.state not in ("idle",):
                         prev_u.interrupted = True
+                        self.gs._interrupted_pipeline_uids.add(prev_uid)
                         logger.info(f"[voice] ── interrupting uid={prev_uid} for new wake word ──")
                         asyncio.run_coroutine_threadsafe(
                             self.gs._interrupt_current(), self.gs.loop
@@ -336,7 +501,7 @@ class GuildVoiceSession:
         self.client = client
         self.loop   = loop
         self._pipeline_is_music = False
-        self.clip_buffer: deque = deque(maxlen=3000)
+        self.clip_buffer = RollingClipBuffer()
 
         self._sessions: dict[int, VoiceSession] = {}
 
@@ -354,6 +519,8 @@ class GuildVoiceSession:
         self._last_wake_word: float = 0.0
         self._pipeline_task: Optional[asyncio.Task] = None
         self._monitor_task: Optional[asyncio.Task] = None
+        self._interrupted_pipeline_uids: set[int] = set()
+        self._protected_pipeline_tasks: set[asyncio.Task] = set()
 
         logger.info(f"[voice] ready in {guild.name} | model: {self._oww_model_name}")
 
@@ -361,19 +528,7 @@ class GuildVoiceSession:
         self._last_activity = time.time()
 
     def get_clip_pcm(self) -> bytes:
-        if not self.clip_buffer:
-            return b""
-        frames = list(self.clip_buffer)
-        if not frames:
-            return b""
-        audio = np.concatenate(frames).astype(np.int16)
-        target_samples = 48000 * 30 * 2
-        if len(audio) < target_samples:
-            padding = np.zeros(target_samples - len(audio), dtype=np.int16)
-            audio = np.concatenate([padding, audio])
-        else:
-            audio = audio[-target_samples:]
-        return audio.tobytes()
+        return self.clip_buffer.to_pcm(CLIP_BUFFER_SECONDS)
 
     def get_session(self, user: discord.User) -> VoiceSession:
         if user.id not in self._sessions:
@@ -383,6 +538,29 @@ class GuildVoiceSession:
             )
         return self._sessions[user.id]
 
+    def can_interrupt_processing(self, uid: int) -> bool:
+        """Allow same-user wake words to interrupt only once TTS is active."""
+        if self.sink and self.sink._active_uid != uid:
+            return False
+        return self._tts_is_active()
+
+    def _tts_is_active(self) -> bool:
+        if not self._voice_client or not self._voice_client.is_connected():
+            return False
+
+        from voice.tts_sources import MixerSource, StandaloneSource
+
+        standalone = getattr(self._voice_client, "_standalone_tts", None)
+        if isinstance(standalone, StandaloneSource):
+            return not standalone._finished_evt.is_set() and not standalone.is_cancelled()
+
+        source = getattr(self._voice_client, "source", None)
+        if isinstance(source, MixerSource):
+            with source._lock:
+                return source._tts_active or bool(source._tts_buf)
+
+        return False
+
     async def _interrupt_current(self):
         """Cancel any in-progress TTS immediately."""
         from voice.tts import cancel_tts
@@ -390,12 +568,54 @@ class GuildVoiceSession:
         if self._monitor_task and not self._monitor_task.done():
             self._monitor_task.cancel()
             self._monitor_task = None
-        if not self._pipeline_is_music:
-            if self._pipeline_task and not self._pipeline_task.done():
-                self._pipeline_task.cancel()
+        pipeline_task = self._pipeline_task
+        if pipeline_task and not pipeline_task.done():
+            if pipeline_task not in self._protected_pipeline_tasks:
+                pipeline_task.cancel()
                 self._pipeline_task = None
         self._pipeline_is_music = False
         logger.info("[voice] ← interrupted current pipeline")
+
+    def _stop_receiving(self):
+        if not self._voice_client:
+            return
+        try:
+            self._voice_client.stop_listening()
+        except discord.ClientException:
+            pass
+        except Exception as e:
+            logger.error(f"[voice] failed to stop receiver: {e}")
+
+    async def _start_receiving(self, voice_channel: discord.VoiceChannel):
+        await asyncio.sleep(1.0)
+        self._oww_model.reset()
+        self._stop_receiving()
+        try:
+            self._voice_client.listen(self.sink)
+        except discord.ClientException as e:
+            if "Already receiving audio" not in str(e):
+                raise
+            logger.warning("[voice] receiver was already active — restarting receive sink")
+            self._stop_receiving()
+            self._voice_client.listen(self.sink)
+        self._last_activity = time.time()
+        if not self._idle_task or self._idle_task.done():
+            self._idle_task = asyncio.create_task(self._idle_loop())
+        logger.info(f"[voice] → listening for wake word in {voice_channel.name}")
+
+    async def _restart_sink(self):
+        if not self._voice_client or not self._voice_client.is_connected():
+            return
+        if self._monitor_task and not self._monitor_task.done():
+            self._monitor_task.cancel()
+            self._monitor_task = None
+        self.sink = BandiBotSink(self)
+        self._stop_receiving()
+        try:
+            self._voice_client.listen(self.sink)
+            logger.info("[voice] receive sink restarted")
+        except Exception as e:
+            logger.error(f"[voice] receive sink restart failed: {e}")
 
     async def start(self, voice_channel: discord.VoiceChannel):
         self.sink = BandiBotSink(self)
@@ -404,12 +624,8 @@ class GuildVoiceSession:
             self._voice_client = existing
         else:
             self._voice_client = await voice_channel.connect(cls=voice_recv.VoiceRecvClient)
-        await asyncio.sleep(1.0)
-        self._oww_model.reset()
-        self._voice_client.listen(self.sink)
-        self._last_activity = time.time()
-        self._idle_task = asyncio.create_task(self._idle_loop())
-        logger.info(f"[voice] → listening for wake word in {voice_channel.name}")
+        self.clip_buffer.start()
+        await self._start_receiving(voice_channel)
 
     async def stop(self):
         if self._idle_task:
@@ -421,8 +637,9 @@ class GuildVoiceSession:
         if self._pipeline_task:
             self._pipeline_task.cancel()
             self._pipeline_task = None
+        self.clip_buffer.stop()
         if self._voice_client and self._voice_client.is_connected():
-            self._voice_client.stop_listening()
+            self._stop_receiving()
             await self._voice_client.disconnect()
         self._voice_client = None
         self.sink = None
@@ -544,6 +761,7 @@ class GuildVoiceSession:
         session = self.get_session(member)
 
         async def _pipeline():
+            current_task = asyncio.current_task()
             try:
                 text = await transcribe(wav_bytes)
                 if not text or len(text.strip()) < 2:
@@ -560,6 +778,11 @@ class GuildVoiceSession:
                 logger.info(f"[llm]  → processing: {text!r}")
                 session.add("user", text)
                 t = time.perf_counter()
+                likely_playback = _looks_like_playback_command(text)
+                if likely_playback:
+                    self._pipeline_is_music = True
+                    if current_task:
+                        self._protected_pipeline_tasks.add(current_task)
                 response_text, should_leave = await handle_voice_command(
                     text=text, member=member, guild=self.guild,
                     client=self.client, history=session.get_history(),
@@ -567,10 +790,15 @@ class GuildVoiceSession:
                 elapsed = (time.perf_counter() - t) * 1000
                 self._pipeline_is_music = not bool(response_text)
 
-                if self.sink and self.sink._get_user(uid).interrupted:
+                was_interrupted = uid in self._interrupted_pipeline_uids
+                if was_interrupted:
+                    self._interrupted_pipeline_uids.discard(uid)
+
+                if self.sink and (self.sink._get_user(uid).interrupted or was_interrupted):
                     logger.info("[voice] ✗ interrupted after LLM — dropping TTS")
                     self.sink._get_user(uid).reset()
-                    return
+                    if response_text:
+                        return
 
                 if response_text:
                     session.add("assistant", response_text)
@@ -584,7 +812,7 @@ class GuildVoiceSession:
                         voice_listener_manager._sessions.pop(self.guild.id, None)
                         try:
                             if self._voice_client and self._voice_client.is_connected():
-                                self._voice_client.stop_listening()
+                                self._stop_receiving()
                                 await self._voice_client.disconnect()
                                 logger.info("[voice] → disconnected")
                         except Exception as e:
@@ -599,11 +827,16 @@ class GuildVoiceSession:
             except Exception as e:
                 logger.error(f"[voice] pipeline error: {e}")
             finally:
+                self._interrupted_pipeline_uids.discard(uid)
+                if current_task:
+                    self._protected_pipeline_tasks.discard(current_task)
+                if self._pipeline_task is current_task:
+                    self._pipeline_task = None
+                    self._pipeline_is_music = False
                 if self.sink:
                     u = self.sink._get_user(uid)
-                    if u.state not in ("listening", "waiting", "processing"):
+                    if u.state not in ("listening", "waiting"):
                         self.sink._reset_user(uid)
-                self._pipeline_task = None
 
         self._pipeline_task = asyncio.create_task(_pipeline())
 
@@ -624,7 +857,12 @@ class VoiceListenerManager:
             return None
         existing = self._sessions.get(guild.id)
         if existing:
-            if existing.sink is not None:
+            voice_client = existing._voice_client
+            if (
+                existing.sink is not None
+                and voice_client is not None
+                and voice_client.is_connected()
+            ):
                 return existing
             await existing.stop()
             self._sessions.pop(guild.id, None)
