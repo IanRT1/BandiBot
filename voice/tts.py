@@ -13,8 +13,8 @@ Playback modes:
   Standalone mode -> play a dedicated StandaloneSource when no music is active
 
 Switching providers:
-  Change TTS_PROVIDER in core/config.py to "kokoro" or "deepgram". This is a
-  code config choice; secrets such as DEEPGRAM_API_KEY stay in the environment.
+  Change TTS_PROVIDER in .env to "kokoro", "deepgram", or "elevenlabs" and
+  restart the bot. Provider-specific code is hidden behind one PCM stream API.
 
 Public API:
   speak()           -> generate and play TTS for a connected voice client
@@ -34,15 +34,13 @@ import discord
 from core.config import TTS_PROVIDER
 from voice.tts_providers import (
     KOKORO_CHUNK_SIZE,
-    generate_kokoro_pcm,
-    load_tts_provider,
-    stream_deepgram_pcm,
+    create_tts_provider,
 )
 from voice.tts_sources import MixerSource, StandaloneSource
 
 logger = logging.getLogger(__name__)
 
-load_tts_provider(TTS_PROVIDER)
+_provider = create_tts_provider(TTS_PROVIDER)
 
 
 def cancel_tts(voice_client: discord.VoiceClient):
@@ -181,28 +179,30 @@ async def _speak_standalone(
 
 
 async def _iter_provider_pcm(text: str):
-    if TTS_PROVIDER == "deepgram":
-        async for chunk in stream_deepgram_pcm(text):
+    """Stream the selected provider, falling back to local Kokoro on failure."""
+    yielded = False
+    try:
+        async for chunk in _provider.stream_pcm(text):
+            yielded = True
             yield chunk
-        return
+    except Exception as exc:
+        # Restarting from Kokoro after partial audio would repeat speech, so
+        # only fail over when the provider failed before producing audio.
+        if yielded or TTS_PROVIDER == "kokoro":
+            raise
 
-    if TTS_PROVIDER == "kokoro":
-        chunks = await asyncio.get_event_loop().run_in_executor(
-            None, lambda: generate_kokoro_pcm(text)
+        logger.warning(
+            "[tts] %s failed before audio (%s); falling back to kokoro",
+            TTS_PROVIDER,
+            exc,
         )
-        for chunk in chunks:
+        fallback = create_tts_provider("kokoro")
+        async for chunk in fallback.stream_pcm(text):
             yield chunk
-        return
-
-    logger.error(f"[tts]  x unsupported TTS_PROVIDER: {TTS_PROVIDER!r}")
 
 
 def _iter_feed_chunks(chunk: bytes):
-    if TTS_PROVIDER != "kokoro":
-        yield chunk
-        return
-
-    chunk_size = KOKORO_CHUNK_SIZE * 2
+    chunk_size = KOKORO_CHUNK_SIZE * 2 if TTS_PROVIDER == "kokoro" else len(chunk)
     for i in range(0, len(chunk), chunk_size):
         yield chunk[i:i + chunk_size]
 

@@ -111,20 +111,27 @@ import logging
 import random
 import asyncio
 
+from dotenv import load_dotenv
+
+load_dotenv()
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "DEBUG").upper(),
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger(__name__)
+logger.info("[startup] initializing BandiBot")
+logging.getLogger("torio").setLevel(logging.WARNING)
+logging.getLogger("torchaudio").setLevel(logging.WARNING)
+
 import discord
 import aiohttp
 
 import voice.tts
-from core.config import DISCORD_TOKEN, LOG_LEVEL
+from core.config import DISCORD_TOKEN
 from bot.handlers import handle_bot_mention
 from music.player import voice_manager
 from voice.listener import voice_listener_manager
-
-logging.basicConfig(
-    level=LOG_LEVEL,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%H:%M:%S",
-)
 
 logging.getLogger("discord").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -135,8 +142,6 @@ logging.getLogger("asyncio").setLevel(logging.WARNING)
 logging.getLogger("PIL").setLevel(logging.WARNING)
 logging.getLogger("urllib3").setLevel(logging.WARNING)
 logging.getLogger("websockets").setLevel(logging.WARNING)
-
-logger = logging.getLogger(__name__)
 
 intents = discord.Intents.all()
 client = discord.Client(intents=intents)
@@ -206,24 +211,29 @@ MAX_RETRIES = 10
 
 def main():
     retries = 0
+    logger.info("[startup] bot initialized; connecting to Discord")
     while retries < MAX_RETRIES:
         try:
+            logger.info("[startup] login attempt %d", retries + 1)
             client.run(DISCORD_TOKEN, log_handler=None)
-            logger.info("Bot exited cleanly.")
+            logger.info("[startup] bot exited cleanly")
             break
         except KeyboardInterrupt:
-            logger.info("Shutdown requested by user.")
+            logger.info("[startup] shutdown requested by user")
             break
         except (aiohttp.ClientConnectionError, aiohttp.ClientPayloadError) as e:
             retries += 1
             wait_time = (2 ** retries) + random.randint(0, 10)
-            logger.critical(f"Network error: {e}. Retry {retries}/{MAX_RETRIES} in {wait_time}s...")
+            logger.critical(
+                "[startup] network error: %s; retry %d/%d in %ds",
+                e, retries, MAX_RETRIES, wait_time,
+            )
             time.sleep(wait_time)
         except Exception as e:
-            logger.critical(f"Unexpected error: {e}. Exiting.")
+            logger.exception("[startup] unexpected error: %s; exiting", e)
             break
     else:
-        logger.critical(f"Exceeded {MAX_RETRIES} retries. Giving up.")
+        logger.critical("[startup] exceeded %d retries; giving up", MAX_RETRIES)
 
 
 if __name__ == "__main__":

@@ -57,6 +57,16 @@ def float32_24k_to_int16_48k(samples: np.ndarray) -> np.ndarray:
     return (np.clip(resampled, -1.0, 1.0) * 32767).astype(np.int16)
 
 
+def resample_int16_mono(samples: np.ndarray, source_rate: int, target_rate: int) -> np.ndarray:
+    """Resample mono int16 PCM between rates used by TTS providers."""
+    if source_rate == target_rate or not len(samples):
+        return samples.astype(np.int16, copy=False)
+    target_len = max(1, round(len(samples) * target_rate / source_rate))
+    indices = np.linspace(0, len(samples) - 1, target_len)
+    resampled = np.interp(indices, np.arange(len(samples)), samples.astype(np.float32))
+    return np.clip(resampled, -32768, 32767).astype(np.int16)
+
+
 def samples_to_wav_bytes(samples: np.ndarray, sample_rate: int) -> bytes:
     """Encode int16 mono PCM samples as an in-memory WAV file."""
     buf = io.BytesIO()

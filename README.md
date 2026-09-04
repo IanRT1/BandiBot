@@ -327,11 +327,19 @@ Replace `assets/BandiBot.onnx` with any openWakeWord-compatible ONNX model. Upda
 
 ### TTS Provider And Voice
 
-The current provider is selected by `TTS_PROVIDER` in `core/config.py`. The default is `kokoro`.
+The provider is selected by `TTS_PROVIDER` in `.env` and takes effect after a
+restart. Supported providers are `kokoro` (default), `deepgram`, and
+`elevenlabs`. All providers expose the same PCM streaming interface, so the
+Discord playback and music-mixing code is provider-independent.
 
 For Kokoro, change `KOKORO_VOICE`, `KOKORO_LANG`, and `KOKORO_SPEED` in `voice/tts_providers.py`.
 
 For Deepgram, change `TTS_MODEL` in `voice/tts_providers.py` to any [Deepgram Aura-2 voice](https://developers.deepgram.com/docs/tts-models). The current Deepgram model constant is `aura-2-javier-es` (Spanish male).
+
+For ElevenLabs, set `TTS_PROVIDER=elevenlabs`, provide `ELEVENLABS_API_KEY`,
+and optionally change `ELEVENLABS_VOICE_ID` or `ELEVENLABS_MODEL` in `.env`.
+ElevenLabs audio is streamed as 24 kHz PCM and converted to Discord's 48 kHz
+PCM format automatically.
 
 Low-level Discord audio buffering lives in `voice/tts_sources.py`. Provider output conversion, including Kokoro's 24kHz float32 to 48kHz int16 PCM conversion, routes through helpers in `voice/audio.py`.
 

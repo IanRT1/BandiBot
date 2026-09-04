@@ -26,19 +26,23 @@ OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-5.6-luna")
 # Optional web-search answer provider. The bot remains usable without it and
 # reports a clear tool error when web search is requested without a key.
 GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
-GEMINI_SEARCH_MODEL: str = os.getenv("GEMINI_SEARCH_MODEL", "gemini-3.8-flash")
+# Fixed grounded-search model for this deployment.
+GEMINI_SEARCH_MODEL: str = "gemini-3.8-flash"
 
 # ── Deepgram ──────────────────────────────────────────────────
 DEEPGRAM_API_KEY: str = os.getenv("DEEPGRAM_API_KEY", "")
 if not DEEPGRAM_API_KEY:
     raise RuntimeError("DEEPGRAM_API_KEY is not set in .env")
 
-# ── TTS Provider ──────────────────────────────────────────────
-# Code-level operational choice, not a secret.
-# Options: "deepgram" | "kokoro"
-TTS_PROVIDER: str = "kokoro"
-if TTS_PROVIDER not in {"deepgram", "kokoro"}:
-    raise RuntimeError("TTS_PROVIDER must be either 'deepgram' or 'kokoro'")
+# ── TTS Providers ────────────────────────────────────────────
+# Change TTS_PROVIDER and restart the bot to switch providers.
+TTS_PROVIDER: str = os.getenv("TTS_PROVIDER", "kokoro").lower()
+if TTS_PROVIDER not in {"deepgram", "kokoro", "elevenlabs"}:
+    raise RuntimeError("TTS_PROVIDER must be 'deepgram', 'kokoro', or 'elevenlabs'")
+
+ELEVENLABS_API_KEY: str = os.getenv("ELEVENLABS_API_KEY", "")
+ELEVENLABS_VOICE_ID: str = os.getenv("ELEVENLABS_VOICE_ID", "JBFqnCBsd6RMkjVDRZzb")
+ELEVENLABS_MODEL: str = os.getenv("ELEVENLABS_MODEL", "eleven_multilingual_v2")
 
 # ── YouTube / yt-dlp ─────────────────────────────────────────
 # Fixed runtime settings for this deployment's YouTube challenge solver.

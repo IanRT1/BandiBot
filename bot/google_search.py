@@ -84,7 +84,11 @@ async def search_web(question: str) -> str:
             async with session.post(_INTERACTIONS_URL, json=payload, headers=headers) as response:
                 data = await response.json(content_type=None)
                 if response.status >= 400:
-                    logger.error("[web] search failed with HTTP %s", response.status)
+                    logger.error(
+                        "[web] search failed with HTTP %s: %s",
+                        response.status,
+                        _format_api_error(data),
+                    )
                     return "Google web search failed. Try again later."
     except (aiohttp.ClientError, TimeoutError) as exc:
         logger.error("Gemini web search connection failed: %s", exc)
@@ -99,3 +103,13 @@ async def search_web(question: str) -> str:
             f"- [{title}]({url})" for title, url in sources[:5]
         )
     return answer
+
+
+def _format_api_error(data) -> str:
+    """Expose useful provider diagnostics without logging request secrets."""
+    error = data.get("error", data) if isinstance(data, dict) else data
+    if isinstance(error, dict):
+        parts = [str(error[key]) for key in ("type", "code", "message", "status") if error.get(key)]
+        if parts:
+            return " | ".join(parts)[:500]
+    return str(error)[:500]

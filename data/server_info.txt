@@ -21,7 +21,7 @@ Bandibot fue creado por Ian usando el modelo gpt-3.5-turbo siendo uno de los pri
 El más reciente de los tres grandes eventos. Involucró a **los Panas**, un subgrupo del servidor. Ha marcado un antes y un después en las dinámicas internas, aunque los detalles permanecen reservados entre quienes lo vivieron. Dicen que **Dr Pol** ha tenido un papel muy importante. 
 
 ### BandiBot actual 2026
-Bandibot se actualizó completamente para mejorar la experiencia integrando el ultimo modelo de lenguaje {model_name}, implementado la reproducción de música por YouTube y mejorando la estructura de el bot para mayor eficiencia.
+Bandibot se actualizó completamente para mejorar la experiencia integrando el ultimo modelo de lenguaje {model_name}, implementado la reproducción de música por YouTube, busqueda en internet y mejorando la estructura de el bot para mayor eficiencia.
 
 ## Notas Generales
 

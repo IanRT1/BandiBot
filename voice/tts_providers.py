@@ -1,92 +1,163 @@
-"""
-voice/tts_providers.py
+"""Provider adapters and registry for BandiBot text-to-speech.
 
-Provider adapters for BandiBot text-to-speech synthesis.
-
-This module owns external and model-specific TTS work. It converts text into
-48kHz int16 mono PCM chunks that voice.tts can feed into Discord audio sources.
-It does not know whether playback is mixed with music or standalone.
-
-Providers:
-  deepgram -> streams Aura-2 linear16 PCM from the Deepgram HTTP API
-  kokoro   -> generates local 24kHz float32 PCM and resamples it to 48kHz int16
-
-Switching:
-  The active provider is selected by core.config.TTS_PROVIDER. That value is a
-  code-level operational choice, not a secret; API keys remain in the env.
+Every provider yields 48 kHz, 16-bit, mono PCM. Playback and music mixing do
+not need to know which service generated the audio.
 """
 
+from __future__ import annotations
+
+import asyncio
 import logging
+from collections.abc import AsyncIterator
+from typing import Protocol
 
 import aiohttp
+import numpy as np
 
-from core.config import DEEPGRAM_API_KEY
-from voice.audio import float32_24k_to_int16_48k
+from core.config import (
+    DEEPGRAM_API_KEY,
+    ELEVENLABS_API_KEY,
+    ELEVENLABS_MODEL,
+    ELEVENLABS_VOICE_ID,
+)
+from voice.audio import float32_24k_to_int16_48k, resample_int16_mono
 
 logger = logging.getLogger(__name__)
 
-# Deepgram settings
-TTS_MODEL = "aura-2-javier-es"
 TTS_SAMPLE_RATE = 48000
+DEEPGRAM_MODEL = "aura-2-javier-es"
 DEEPGRAM_SPEED = 1.3
-
-# Kokoro settings
 KOKORO_VOICE = "ef_dora"
 KOKORO_LANG = "e"
 KOKORO_SPEED = 1.1
-KOKORO_SAMPLE_RATE = 24000
 KOKORO_CHUNK_SIZE = 4096
-
-_kokoro_pipeline = None
-
-
-def load_tts_provider(provider: str) -> None:
-    """Initialize provider resources that should be ready before first speech."""
-    if provider != "kokoro":
-        return
-    _get_kokoro_pipeline()
+ELEVENLABS_PCM_RATE = 24000
 
 
-async def stream_deepgram_pcm(text: str):
-    """Yield Deepgram Aura-2 48kHz int16 mono PCM chunks."""
-    url = (
-        "https://api.deepgram.com/v1/speak"
-        f"?model={TTS_MODEL}&encoding=linear16"
-        f"&sample_rate={TTS_SAMPLE_RATE}&container=none&speed={DEEPGRAM_SPEED}"
-    )
-    headers = {
-        "Authorization": f"Token {DEEPGRAM_API_KEY}",
-        "Content-Type": "application/json",
-    }
-
-    async with aiohttp.ClientSession() as session:
-        async with session.post(url, headers=headers, json={"text": text}) as resp:
-            if resp.status != 200:
-                body = await resp.text()
-                logger.error(f"[tts]  x Deepgram {resp.status}: {body}")
-                return
-
-            async for chunk in resp.content.iter_chunked(4096):
-                if chunk:
-                    yield chunk
+class TTSProviderError(RuntimeError):
+    """A provider could not synthesize speech."""
 
 
-def generate_kokoro_pcm(text: str) -> list[bytes]:
-    """Return Kokoro-generated 48kHz int16 mono PCM chunks."""
-    pipeline = _get_kokoro_pipeline()
-    chunks = []
-    for _, _, audio in pipeline(text, voice=KOKORO_VOICE, speed=KOKORO_SPEED):
-        resampled = float32_24k_to_int16_48k(audio)
-        chunks.append(resampled.tobytes())
-    return chunks
+class TTSProvider(Protocol):
+    name: str
+
+    async def stream_pcm(self, text: str) -> AsyncIterator[bytes]:
+        """Yield 48 kHz, 16-bit, mono PCM chunks."""
 
 
-def _get_kokoro_pipeline():
-    global _kokoro_pipeline
-    if _kokoro_pipeline is None:
-        from kokoro import KPipeline
+class DeepgramProvider:
+    name = "deepgram"
 
-        logger.info("[tts]  -> loading Kokoro pipeline (this may take a moment on first run)...")
-        _kokoro_pipeline = KPipeline(lang_code=KOKORO_LANG)
-        logger.info("[tts]  -> Kokoro pipeline ready")
-    return _kokoro_pipeline
+    async def stream_pcm(self, text: str) -> AsyncIterator[bytes]:
+        url = (
+            "https://api.deepgram.com/v1/speak"
+            f"?model={DEEPGRAM_MODEL}&encoding=linear16"
+            f"&sample_rate={TTS_SAMPLE_RATE}&container=none&speed={DEEPGRAM_SPEED}"
+        )
+        headers = {"Authorization": f"Token {DEEPGRAM_API_KEY}", "Content-Type": "application/json"}
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, json={"text": text}) as resp:
+                if resp.status != 200:
+                    try:
+                        data = await resp.json(content_type=None)
+                    except (aiohttp.ContentTypeError, ValueError):
+                        data = await resp.text()
+                    raise TTSProviderError(
+                        f"Deepgram HTTP {resp.status}: {_format_api_error(data)}"
+                    )
+                async for chunk in resp.content.iter_chunked(4096):
+                    if chunk:
+                        yield chunk
+
+
+class KokoroProvider:
+    name = "kokoro"
+    _pipeline = None
+
+    async def initialize(self) -> None:
+        await asyncio.get_running_loop().run_in_executor(None, self._get_pipeline)
+
+    async def stream_pcm(self, text: str) -> AsyncIterator[bytes]:
+        chunks = await asyncio.get_running_loop().run_in_executor(None, self._generate, text)
+        for chunk in chunks:
+            yield chunk
+
+    def _generate(self, text: str) -> list[bytes]:
+        chunks = []
+        for _, _, audio in self._get_pipeline()(text, voice=KOKORO_VOICE, speed=KOKORO_SPEED):
+            chunks.append(float32_24k_to_int16_48k(audio).tobytes())
+        return chunks
+
+    @classmethod
+    def _get_pipeline(cls):
+        if cls._pipeline is None:
+            from kokoro import KPipeline
+
+            logger.info("[tts] -> loading Kokoro pipeline")
+            cls._pipeline = KPipeline(lang_code=KOKORO_LANG)
+            logger.info("[tts] -> Kokoro pipeline ready")
+        return cls._pipeline
+
+
+class ElevenLabsProvider:
+    name = "elevenlabs"
+
+    async def stream_pcm(self, text: str) -> AsyncIterator[bytes]:
+        url = (
+            "https://api.elevenlabs.io/v1/text-to-speech/"
+            f"{ELEVENLABS_VOICE_ID}/stream?output_format=pcm_24000"
+        )
+        headers = {"xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json"}
+        payload = {"text": text, "model_id": ELEVENLABS_MODEL}
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, json=payload) as resp:
+                if resp.status != 200:
+                    try:
+                        data = await resp.json(content_type=None)
+                    except (aiohttp.ContentTypeError, ValueError):
+                        data = await resp.text()
+                    raise TTSProviderError(
+                        f"ElevenLabs HTTP {resp.status}: {_format_api_error(data)}"
+                    )
+                pending = bytearray()
+                async for chunk in resp.content.iter_chunked(4096):
+                    if not chunk:
+                        continue
+                    pending.extend(chunk)
+                    even_length = len(pending) - len(pending) % 2
+                    if even_length:
+                        samples = np.frombuffer(pending[:even_length], dtype=np.int16).copy()
+                        del pending[:even_length]
+                        yield resample_int16_mono(
+                            samples, ELEVENLABS_PCM_RATE, TTS_SAMPLE_RATE
+                        ).tobytes()
+
+
+TTS_PROVIDERS: dict[str, type] = {
+    "deepgram": DeepgramProvider,
+    "kokoro": KokoroProvider,
+    "elevenlabs": ElevenLabsProvider,
+}
+
+
+def create_tts_provider(name: str) -> TTSProvider:
+    try:
+        return TTS_PROVIDERS[name]()
+    except KeyError as exc:
+        raise RuntimeError(f"Unsupported TTS provider: {name!r}") from exc
+
+
+async def load_tts_provider(provider: TTSProvider) -> None:
+    initialize = getattr(provider, "initialize", None)
+    if initialize:
+        await initialize()
+
+
+def _format_api_error(data) -> str:
+    """Expose provider diagnostics without logging headers or request payloads."""
+    error = data.get("detail", data.get("error", data)) if isinstance(data, dict) else data
+    if isinstance(error, dict):
+        parts = [str(error[key]) for key in ("type", "code", "message", "status") if error.get(key)]
+        if parts:
+            return " | ".join(parts)[:500]
+    return str(error)[:500]

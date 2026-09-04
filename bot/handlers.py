@@ -56,14 +56,12 @@ logger = logging.getLogger(__name__)
 # Load instructions template once at import time
 with open("data/instructions.txt", "r", encoding="utf-8") as _f:
     _INSTRUCTIONS_TEMPLATE = _f.read().strip()
-logger.info(f"Loaded instructions.txt ({len(_INSTRUCTIONS_TEMPLATE)} chars)")
 
 # Load static server lore once at import time
 _SERVER_LORE = ""
 if os.path.exists("data/server_info.txt"):
     with open("data/server_info.txt", "r", encoding="utf-8") as _f:
         _SERVER_LORE = _f.read().strip().replace("{model_name}", OPENAI_MODEL)
-    logger.info(f"Loaded server_info.txt ({len(_SERVER_LORE)} chars)")
 
 
 def _strip_bot_mentions(message, client):
