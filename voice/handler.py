@@ -73,6 +73,59 @@ async def _execute_playback_tool(tool_call, proxy):
             _BACKGROUND_PLAYBACK_TASKS.discard(task)
 
 
+def _search_acknowledgement(text: str) -> str:
+    """Choose a short acknowledgement in the language of the command."""
+    spanish_markers = (
+        " qué", "cómo", "como", "cuál", "cual", "dónde", "donde",
+        " cuándo", "cuando", " quién", "quien", " busca", " buscar",
+        " tiempo", " clima", " noticias", " cuánto", "cuanto",
+    )
+    lowered = f" {text.lower()}"
+    if any(marker in lowered for marker in spanish_markers):
+        return "Dame un momento, voy a buscarlo en internet."
+    return "One moment, I’ll look that up online."
+
+
+async def _speak_search_acknowledgement(guild, text: str):
+    """Speak a search acknowledgement without requiring a second LLM call."""
+    from voice.listener import voice_listener_manager
+    from voice.tts import speak
+
+    session = voice_listener_manager.get_session(guild)
+    if not session or not session._voice_client:
+        return
+    if not session._voice_client.is_connected():
+        return
+
+    await speak(
+        session._voice_client,
+        _search_acknowledgement(text),
+        guild=guild,
+        clip_buffer=session.clip_buffer,
+    )
+
+
+async def _execute_web_search_tool(tool_call, proxy, text: str):
+    """Search immediately while the voice acknowledgement plays."""
+    search_task = asyncio.create_task(execute_tool_call(tool_call, proxy))
+    acknowledgement_task = asyncio.create_task(
+        _speak_search_acknowledgement(proxy.guild, text)
+    )
+    try:
+        result = await search_task
+    except asyncio.CancelledError:
+        acknowledgement_task.cancel()
+        raise
+    finally:
+        try:
+            await acknowledgement_task
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.debug("[voice] search acknowledgement failed: %s", exc)
+    return result
+
+
 def _build_voice_context(member: discord.Member, guild: discord.Guild) -> str:
     user_nick_or_name = clean_username(
         getattr(member, 'nick', None),
@@ -194,6 +247,8 @@ async def handle_voice_command(
         for tc in tool_calls:
             if is_music_tool(tc["name"]):
                 result = await _execute_playback_tool(tc, proxy)
+            elif tc["name"] == "web_search":
+                result = await _execute_web_search_tool(tc, proxy, text)
             else:
                 result = await execute_tool_call(tc, proxy)
             messages.append({
@@ -219,6 +274,12 @@ async def handle_voice_command(
     response_text = raw.strip() if raw else "Listo."
 
     elapsed = (time.perf_counter() - t_start) * 1000
-    logger.info(f"[llm]  ← {elapsed:.0f}ms | speaking ({len(response_text)} chars): {response_text!r}")
+    preview = " ".join(response_text.split())
+    if len(preview) > 160:
+        preview = preview[:159] + "…"
+    logger.info(
+        "[voice] response ready | %.0fms | speaking %d chars | response=%s",
+        elapsed, len(response_text), preview,
+    )
 
     return response_text, should_leave

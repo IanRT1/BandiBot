@@ -264,4 +264,30 @@ GET_SERVER_INFO_TOOL = [
     }
 ]
 
-ALL_TOOLS = MUSIC_TOOLS + GET_MEMBER_ACTIVITY_TOOL + GET_SERVER_INFO_TOOL
+WEB_SEARCH_TOOL = [
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": (
+                "Search the live web and return a concise answer with sources. "
+                "Use this for current, changing, or externally verifiable information: "
+                "news, weather, prices, schedules, public facts, product details, "
+                "recent events, or questions you cannot answer reliably from memory. "
+                "Do not use this for BandiBot/server lore, music playback, or ordinary conversation."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": "The complete natural-language question to search for.",
+                    }
+                },
+                "required": ["question"],
+            },
+        },
+    }
+]
+
+ALL_TOOLS = MUSIC_TOOLS + GET_MEMBER_ACTIVITY_TOOL + GET_SERVER_INFO_TOOL + WEB_SEARCH_TOOL

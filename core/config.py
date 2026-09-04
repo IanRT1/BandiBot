@@ -23,6 +23,11 @@ if not OPENAI_API_KEY:
 
 OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-5.6-luna")
 
+# Optional web-search answer provider. The bot remains usable without it and
+# reports a clear tool error when web search is requested without a key.
+GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
+GEMINI_SEARCH_MODEL: str = os.getenv("GEMINI_SEARCH_MODEL", "gemini-3.8-flash")
+
 # ── Deepgram ──────────────────────────────────────────────────
 DEEPGRAM_API_KEY: str = os.getenv("DEEPGRAM_API_KEY", "")
 if not DEEPGRAM_API_KEY:
@@ -36,9 +41,9 @@ if TTS_PROVIDER not in {"deepgram", "kokoro"}:
     raise RuntimeError("TTS_PROVIDER must be either 'deepgram' or 'kokoro'")
 
 # ── YouTube / yt-dlp ─────────────────────────────────────────
-# Optional JavaScript challenge solver settings for modern YouTube extraction.
-YOUTUBE_JS_RUNTIME: str = os.getenv("YOUTUBE_JS_RUNTIME", "").strip()
-YOUTUBE_REMOTE_COMPONENTS: str = os.getenv("YOUTUBE_REMOTE_COMPONENTS", "").strip()
+# Fixed runtime settings for this deployment's YouTube challenge solver.
+YOUTUBE_JS_RUNTIME: str = "node"
+YOUTUBE_REMOTE_COMPONENTS: str = "ejs:github"
 
 # ── Logging ───────────────────────────────────────────────────
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "DEBUG").upper()

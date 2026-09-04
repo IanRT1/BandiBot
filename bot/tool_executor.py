@@ -240,6 +240,11 @@ async def _handle_clip_audio(message, args):
     return await send_recent_clip(message.guild, message.author, message.channel)
 
 
+async def _handle_web_search(message, args):
+    from bot.google_search import search_web
+    return await search_web(args.get("question", ""))
+
+
 TOOL_HANDLERS = {
     "play_music": _handle_play_music,
     "queue_bulk": _handle_queue_bulk,
@@ -256,13 +261,14 @@ TOOL_HANDLERS = {
     "get_server_info": _handle_get_server_info,
     "get_member_activity": _handle_get_member_activity,
     "clip_audio": _handle_clip_audio,
+    "web_search": _handle_web_search,
 }
 
 
 async def execute_tool_call(tool_call, message):
     name = tool_call["name"]
     args = tool_call["arguments"]
-    logger.info(f"  tool call: {name}({args})")
+    logger.info("[tool] %s", name)
 
     handler = TOOL_HANDLERS.get(name)
     if handler is None:

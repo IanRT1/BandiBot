@@ -371,7 +371,7 @@ class BandiBotSink(voice_recv.AudioSink):
                     u.interrupted = True
                     self.gs._interrupted_pipeline_uids.add(uid)
                     logger.info(
-                        f"[voice] ── interrupting uid={uid} for repeated wake word during TTS ──"
+                        "[voice] interrupting current TTS for a repeated wake word"
                     )
                     asyncio.run_coroutine_threadsafe(
                         self.gs._interrupt_current(), self.gs.loop
@@ -393,13 +393,13 @@ class BandiBotSink(voice_recv.AudioSink):
                     if prev_u.state not in ("idle",):
                         prev_u.interrupted = True
                         self.gs._interrupted_pipeline_uids.add(prev_uid)
-                        logger.info(f"[voice] ── interrupting uid={prev_uid} for new wake word ──")
+                        logger.info("[voice] interrupting current response for a new wake word")
                         asyncio.run_coroutine_threadsafe(
                             self.gs._interrupt_current(), self.gs.loop
                         )
                         prev_u.reset()
 
-                logger.info(f"[voice] ── wake word ({user.display_name}, hits={hits}/{SMOOTHING_WINDOW} avg={avg:.3f}) ──")
+                logger.info("[voice] wake word detected")
                 u.state = "waiting"
                 self._active_uid = uid
                 asyncio.run_coroutine_threadsafe(
@@ -675,7 +675,7 @@ class GuildVoiceSession:
         from voice.tts import play_activation, cancel_tts
         self.bump_activity()
         cancel_tts(self._voice_client)
-        logger.info(f"[voice] → listening for command [{user.display_name}]")
+        logger.info("[voice] listening for command")
         try:
             asyncio.create_task(play_activation(self._voice_client))
         except Exception as e:
@@ -686,7 +686,7 @@ class GuildVoiceSession:
 
     async def _speech_monitor(self, uid: int, display_name: str):
         start = time.time()
-        logger.info(f"[vad]  monitor started for {display_name}")
+        logger.debug("[vad] monitor started")
 
         try:
             while True:
@@ -775,7 +775,7 @@ class GuildVoiceSession:
                     self.sink._get_user(uid).reset()
                     return
 
-                logger.info(f"[llm]  → processing: {text!r}")
+                logger.info("[voice] transcription received (%d chars)", len(text))
                 session.add("user", text)
                 t = time.perf_counter()
                 likely_playback = _looks_like_playback_command(text)

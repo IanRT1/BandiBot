@@ -216,18 +216,9 @@ OPENAI_API_KEY=your_openai_api_key
 DEEPGRAM_API_KEY=your_deepgram_api_key
 ```
 
-Optional YouTube JavaScript challenge settings for yt-dlp:
-
-```env
-# Optional JavaScript challenge solver. Node 22+ works if installed on PATH.
-YOUTUBE_JS_RUNTIME=node
-
-# Allows yt-dlp to fetch EJS solver scripts when needed.
-YOUTUBE_REMOTE_COMPONENTS=ejs:github
-```
-
-Use these when YouTube starts returning `n challenge solving failed` or related
-signature extraction errors during music playback resolution.
+YouTube challenge solving is configured centrally in `core/config.py` with Node
+and the `ejs:github` remote component source. Node 22+ must be installed and
+available on PATH.
 
 If YouTube starts returning playable-search results but every stream fails with
 `HTTP Error 403: Forbidden`, update yt-dlp to the current pre-release/nightly:

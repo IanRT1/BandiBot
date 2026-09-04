@@ -22,12 +22,31 @@ import os
 import re
 import sys
 import time
+import warnings
 from collections import deque
 
 # ── Must be set before any HuggingFace/Kokoro imports ────────────────────────
 # Prevents Kokoro from hitting huggingface.co on every TTS call to check
 # for voice file updates. Uses cached files only.
 os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
+
+# These are known startup warnings from optional ML dependencies. Keep other
+# warnings visible so new compatibility problems are not hidden.
+warnings.filterwarnings(
+    "ignore",
+    message=r"Defaulting repo_id to hexgrad/Kokoro-82M.*",
+)
+warnings.filterwarnings(
+    "ignore",
+    message=r"dropout option adds dropout after all but last recurrent layer.*",
+    category=UserWarning,
+)
+warnings.filterwarnings(
+    "ignore",
+    message=r"torch\.nn\.utils\.weight_norm is deprecated.*",
+    category=FutureWarning,
+)
 
 # ── Stderr filter — must be installed before any discord/voice/oww imports ───
 # discord-ext-voice-recv and openwakeword write warnings directly to stderr
@@ -52,6 +71,14 @@ class _PacketLossFilter:
         self._times: deque = deque()
 
     def write(self, msg: str):
+        if (
+            "All log messages before absl::InitializeLog()" in msg
+            or "oneDNN custom operations are on" in msg
+            or "Defaulting repo_id to hexgrad/Kokoro-82M" in msg
+            or "torch.nn.utils.weight_norm is deprecated" in msg
+            or msg.strip() == "WeightNorm.apply(module, name, dim)"
+        ):
+            return
         if self.PATTERN_TFLITE.search(msg):
             return
         if self.PATTERN.search(msg):
@@ -117,7 +144,7 @@ client = discord.Client(intents=intents)
 
 @client.event
 async def on_ready():
-    logger.info(f"Logged in as {client.user} (ID: {client.user.id})")
+    logger.info("[startup] logged in as %s", client.user)
 
 
 _processed_messages: set[int] = set()

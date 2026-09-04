@@ -43,10 +43,18 @@ async def send_to_openai(payload, tools=None):
         kwargs = {
             "model": model,
             "messages": messages,
-            "temperature": temperature,
         }
+        # GPT-5.6 models only support their default temperature value.
+        if not model.startswith("gpt-5.6"):
+            kwargs["temperature"] = temperature
         if tools:
             kwargs["tools"] = tools
+            # GPT-5.6 Luna defaults to reasoning, but its Chat Completions
+            # endpoint only accepts function tools when reasoning is disabled.
+            # Keep the existing tool-call protocol and opt out only for this
+            # model; Responses API migration can be handled independently.
+            if model.startswith("gpt-5.6"):
+                kwargs["reasoning_effort"] = payload.get("reasoning_effort", "none")
 
         response = await _client.chat.completions.create(**kwargs)
         msg = response.choices[0].message

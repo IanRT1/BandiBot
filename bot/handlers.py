@@ -159,7 +159,7 @@ async def handle_bot_mention(message, client):
     t_start = time.perf_counter()
     total_tokens = 0
 
-    logger.info(f"→ {user_name} ({msg_len} chars): {message.content[:80]!r}")
+    logger.info("[chat] received (%d chars): %s", msg_len, _log_preview(message.content))
 
     # ── Audio attachment shortcut — bypass LLM entirely ───────────────────────
     audio_attachments = get_audio_attachments(message)
@@ -178,7 +178,7 @@ async def handle_bot_mention(message, client):
         )
         prep_ms = (time.perf_counter() - t_prep) * 1000
 
-        logger.info(f"  prep took {prep_ms:.0f}ms")
+        logger.debug("[chat] context prepared in %.0fms", prep_ms)
 
         context_info, user_message = build_context_info(message, client)
         instruction = build_instruction(
@@ -329,9 +329,18 @@ async def handle_bot_mention(message, client):
 
     total_ms = (time.perf_counter() - t_start) * 1000
     logger.info(
-        f"← replied to {user_name} ({len(response_text)} chars) | "
-        f"llm {llm_ms:.0f}ms | tokens {total_tokens} | total {total_ms:.0f}ms"
+        "[chat] response sent (%d chars) | llm %.0fms | total %.0fms | response=%s",
+        len(response_text), llm_ms, total_ms, _log_preview(response_text),
     )
+
+
+def _log_preview(text: str, limit: int = 160) -> str:
+    """Return a compact, single-line response preview for operational logs."""
+    preview = re.sub(r"<@!?\d+>", "@bot", text or "")
+    preview = " ".join(preview.split())
+    if len(preview) > limit:
+        return preview[: limit - 1] + "…"
+    return preview
 
 
 async def fetch_recent_messages(channel, client, limit=20, exclude_message_id=None):
