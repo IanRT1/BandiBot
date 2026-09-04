@@ -12,5 +12,8 @@ requires-python = ">=3.11"
 [project.scripts]
 bandibot = "core.client:main"
 
+[project.optional-dependencies]
+test = ["pytest>=8,<10"]
+
 [tool.setuptools.packages.find]
 where = ["."]

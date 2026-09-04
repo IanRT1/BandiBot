@@ -23,6 +23,8 @@ __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
+.pytest_cache/
+pytest-cache-files*/
 *.sqlite3
 *.db
 .venv/
