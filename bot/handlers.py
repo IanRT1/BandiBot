@@ -46,6 +46,7 @@ from bot.utils import (
 from bot.tool_schemas import ALL_TOOLS
 from bot.openai_client import send_to_openai
 from bot.tool_executor import execute_tool_call, is_music_tool
+from core.config import OPENAI_MODEL
 
 from music.player import voice_manager
 from music.attachments import get_audio_attachments, handle_audio_attachments
@@ -61,7 +62,7 @@ logger.info(f"Loaded instructions.txt ({len(_INSTRUCTIONS_TEMPLATE)} chars)")
 _SERVER_LORE = ""
 if os.path.exists("data/server_info.txt"):
     with open("data/server_info.txt", "r", encoding="utf-8") as _f:
-        _SERVER_LORE = _f.read().strip()
+        _SERVER_LORE = _f.read().strip().replace("{model_name}", OPENAI_MODEL)
     logger.info(f"Loaded server_info.txt ({len(_SERVER_LORE)} chars)")
 
 

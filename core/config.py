@@ -21,7 +21,7 @@ OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
 if not OPENAI_API_KEY:
     raise RuntimeError("OPENAI_API_KEY is not set in .env")
 
-OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-5.4-nano")
+OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-5.6-luna")
 
 # ── Deepgram ──────────────────────────────────────────────────
 DEEPGRAM_API_KEY: str = os.getenv("DEEPGRAM_API_KEY", "")

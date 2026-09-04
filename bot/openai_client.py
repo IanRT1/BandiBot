@@ -17,7 +17,7 @@ Tool call response shape:
 Text response shape:
   {"choices": [{"message": {"content": "..."}}]}
 
-Model is configurable via OPENAI_MODEL env var, defaults to gpt-5.4-nano.
+Model is configurable via OPENAI_MODEL env var, defaults to gpt-5.6-luna.
 All API errors are caught and logged; None is returned on failure.
 """
 
