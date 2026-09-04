@@ -14,7 +14,7 @@ Pipeline:
   → Track construction → VoiceManager queue → Discord confirmation reply
 
 Metadata support:
-  - MP3       → ID3 title, artist, duration, APIC cover art
+  - MP3/WAV   → ID3 title, artist, duration, APIC cover art
   - FLAC      → Vorbis comments, duration, embedded pictures
   - M4A/AAC   → MP4 atoms, duration, cover art
   - OGG/OPUS  → Vorbis comments, duration, FLAC PICTURE block cover art
@@ -38,6 +38,7 @@ from mutagen.id3 import ID3
 from mutagen.mp3 import MP3
 from mutagen.mp4 import MP4
 from mutagen.oggvorbis import OggVorbis
+from mutagen.wave import WAVE
 
 from bot.utils import clean_username
 from music.player import voice_manager
@@ -100,6 +101,23 @@ async def _extract_audio_metadata(url: str, ext: str) -> dict:
                     result["thumbnail_bytes"] = apic[0].data
             except Exception:
                 pass
+
+        elif ext == ".wav":
+            # WAV files can carry ID3 tags in the RIFF container.  Keep this
+            # separate from the MP3 branch: WAVE.info provides the duration,
+            # while WAVE.tags/ID3 provide title, artist, and APIC artwork.
+            buf.seek(0)
+            f = WAVE(buf)
+            result["duration"] = int(f.info.length) if f.info else None
+            tags = f.tags
+            if tags:
+                tit2 = tags.get("TIT2")
+                tpe1 = tags.get("TPE1")
+                result["title"] = str(tit2) if tit2 else None
+                result["artist"] = str(tpe1) if tpe1 else None
+                apic = tags.getall("APIC")
+                if apic:
+                    result["thumbnail_bytes"] = apic[0].data
 
         elif ext in (".m4a", ".aac"):
             buf.seek(0)
@@ -167,7 +185,9 @@ async def handle_audio_attachments(
         await player.connect(voice_channel)
 
         queued_titles = []
-        is_busy = player.is_playing or (
+        # Keep the queue owned by the natural-end callback. Discord can
+        # briefly report no audio while player.current still holds the track.
+        is_busy = player.has_active_track or (
             player.is_connected and player.voice_client.is_paused()
         )
 

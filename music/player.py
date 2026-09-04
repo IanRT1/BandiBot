@@ -155,6 +155,16 @@ class GuildPlayer:
         )
 
     @property
+    def has_active_track(self) -> bool:
+        """Whether a track is owned by the player, including end transitions.
+
+        Discord's voice client can briefly report ``is_playing()`` as false
+        between FFmpeg ending and the ``after`` callback advancing the queue.
+        ``current`` remains authoritative during that handoff.
+        """
+        return self.current is not None
+
+    @property
     def elapsed_seconds(self) -> float:
         if not self.current:
             return 0.0
@@ -372,7 +382,10 @@ class GuildPlayer:
     def _needs_stream_refresh(self, track: Track) -> bool:
         if not track.resolved or not track.stream_url:
             return False
-        if not (track.query or track.webpage_url):
+        # Uploaded attachments have a webpage_url (their Discord CDN URL),
+        # but they are already fully resolved and must never be sent through
+        # yt-dlp. Only resolver-created tracks have a query to refresh.
+        if not track.query:
             return False
         return time.time() - track.resolved_at >= _STREAM_REFRESH_AFTER
 
@@ -431,13 +444,13 @@ class GuildPlayer:
                     finished_track.duration,
                     finished_track.title,
                 )
-                if finished_track.playback_failures < 1 and (finished_track.query or finished_track.webpage_url):
+                if finished_track.playback_failures < 1 and finished_track.query:
                     finished_track.playback_failures += 1
                     logger.info(f"[music] refreshing and retrying early-ended track: {finished_track.title!r}")
 
                     async def _refresh_and_retry():
                         try:
-                            refresh_query = finished_track.query or finished_track.webpage_url
+                            refresh_query = finished_track.query
                             excluded_urls = {finished_track.webpage_url} if finished_track.webpage_url else set()
                             resolved = await _resolve_track_async(
                                 refresh_query,
@@ -553,7 +566,7 @@ class VoiceManager:
             await player.connect(voice_channel)
             player.queue.append(track)
 
-            is_busy = player.is_playing or (player.is_connected and player.voice_client.is_paused())
+            is_busy = player.has_active_track or (player.is_connected and player.voice_client.is_paused())
 
             if not is_busy:
                 player.play_next()
@@ -587,7 +600,7 @@ class VoiceManager:
                 )
                 player.queue.append(track)
 
-            is_busy = player.is_playing or (player.is_connected and player.voice_client.is_paused())
+            is_busy = player.has_active_track or (player.is_connected and player.voice_client.is_paused())
 
             player.start_resolver()
 
@@ -622,7 +635,7 @@ class VoiceManager:
             for track in entries:
                 player.queue.append(track)
 
-            is_busy = player.is_playing or (player.is_connected and player.voice_client.is_paused())
+            is_busy = player.has_active_track or (player.is_connected and player.voice_client.is_paused())
 
             player.start_resolver()
 
