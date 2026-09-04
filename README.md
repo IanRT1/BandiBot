@@ -1,6 +1,6 @@
 # BandiBot
 
-> A self-hosted Discord bot with continuous voice listening, wake word detection, real-time speech-to-text, LLM reasoning with tool calls, TTS mixed over music, and a full music queue system — all running locally on your own machine.
+> A self-hosted Discord AI assistant with continuous voice listening, wake-word detection, real-time speech recognition, LLM tool calling, Google Search integration, multi-provider text-to-speech with automatic fallback, TTS mixed over music, and a full YouTube music queue system — running on your own machine.
 
 <br>
 
