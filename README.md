@@ -15,6 +15,7 @@
 - [Wake Word Setup](#wake-word-setup)
 - [Project Structure](#project-structure)
 - [Customization](#customization)
+- [Testing](#testing)
 - [License](#license)
 
 ---
@@ -23,7 +24,7 @@
 
 BandiBot is a fully self-hosted Discord bot designed for friend group servers. It listens continuously in voice channels for a custom wake word, transcribes commands via Deepgram, reasons through them with an OpenAI LLM, and responds via the configured text-to-speech provider — all while music plays uninterrupted in the background.
 
-Every instance is independently hosted by the user. There is no central server, no shared infrastructure, and no data leaving your machine except to the APIs you configure (Discord, OpenAI, Deepgram).
+Every instance is independently hosted by the user. There is no central server, no shared infrastructure, and no data leaving your machine except to the APIs you configure (Discord, OpenAI, Deepgram, Gemini, and optionally ElevenLabs).
 
 ---
 
@@ -34,7 +35,8 @@ Every instance is independently hosted by the user. There is no central server, 
 - **Per-user voice activity detection** using Silero VAD with configurable grace periods and silence thresholds
 - **Speech-to-text** via Deepgram Nova-3
 - **LLM reasoning** with full tool call support via OpenAI
-- **Text-to-speech** via Kokoro by default, with a Deepgram Aura-2 path available in code; speech is mixed directly into the music stream at PCM level so music never pauses
+- **Text-to-speech** via Kokoro, Deepgram Aura-2, or ElevenLabs; speech is mixed directly into the music stream at PCM level so music never pauses
+- **Automatic TTS fallback** — if a remote provider fails before producing audio, the response automatically falls back to local Kokoro
 - **Mid-speech interruption** — trigger the wake word while the bot is speaking to immediately cancel and start a new command
 - **Per-user isolation** — only the user who triggered the wake word has their audio captured; other speakers are ignored
 - **Voice music feedback** — voice-detected song requests post the heard query first, then replace that same message with the final queued or now-playing result
@@ -52,8 +54,9 @@ Every instance is independently hosted by the user. There is no central server, 
 ### Text Commands
 - Full conversational LLM responses via @mention
 - Music control via natural language
+- Google Search-grounded answers for current web questions
 - Server member activity and presence lookup
-- Server history and lore via configurable `server_info.txt`
+- Private server history and lore via local `server_info.txt`
 - Recent channel history included in every request for conversational continuity
 
 ---
@@ -80,7 +83,7 @@ Discord Gateway
                           ├── voice/stt.py (Deepgram Nova-3)
                           ├── voice/handler.py (LLM + tool calls)
                           └── voice/tts.py (TTS orchestration)
-                                    ├── voice/tts_providers.py (Kokoro / Deepgram Aura-2)
+                                    ├── voice/tts_providers.py (Kokoro / Deepgram / ElevenLabs registry)
                                     ├── voice/tts_sources.py (MixerSource / StandaloneSource)
                                     └── music/player.py (FFmpeg → MixerSource → Discord)
 ```
@@ -96,6 +99,8 @@ Discord Gateway
 **Per-user state machines** — each user in the voice channel has independent wake word detection, VAD state, and capture buffers. Packet loss or bad audio from one user does not affect others.
 
 **Music starts voice listening** — when a text command makes the bot join voice for music playback, `music/player.py` explicitly starts the wake-word listener on the same voice client. The Discord voice-state event also starts listening, and the listener manager de-duplicates repeated starts.
+
+**Private deployment context** — personal instructions and server lore are ignored by Git. Generic `.example.txt` templates are tracked and used automatically when the private files are absent.
 
 ---
 
@@ -117,7 +122,9 @@ pip install -r requirements.txt
 ### API Keys
 - [Discord Developer Portal](https://discord.com/developers/applications) — Bot token
 - [OpenAI Platform](https://platform.openai.com/) — API key
-- [Deepgram Console](https://console.deepgram.com/) — API key used for STT, and also for TTS if the Deepgram TTS path is selected in code
+- [Deepgram Console](https://console.deepgram.com/) — API key used for STT and optional Deepgram TTS
+- [Google AI Studio](https://aistudio.google.com/app/apikey) — API key for Google Search grounding
+- [ElevenLabs](https://elevenlabs.io/app/settings/api-keys) — optional API key for ElevenLabs TTS
 
 ### FFmpeg
 
@@ -145,7 +152,7 @@ ffmpeg -version
 
 ### espeak-ng
 
-The current code defaults to Kokoro TTS in `core/config.py`. Kokoro requires `espeak-ng` as a system dependency.
+The default provider is Kokoro. Kokoro requires `espeak-ng` as a system dependency. If you select ElevenLabs or Deepgram, the corresponding API key is required for remote synthesis; Kokoro remains the automatic fallback.
 
 Verify installation:
 ```bash
@@ -214,7 +221,16 @@ Create a `.env` file in the root directory with the following variables:
 DISCORD_TOKEN=your_discord_bot_token
 OPENAI_API_KEY=your_openai_api_key
 DEEPGRAM_API_KEY=your_deepgram_api_key
+GEMINI_API_KEY=your_gemini_api_key
+
+# Optional remote TTS provider
+TTS_PROVIDER=kokoro
+ELEVENLABS_API_KEY=your_elevenlabs_api_key
+ELEVENLABS_VOICE_ID=your_voice_id
+ELEVENLABS_MODEL=eleven_multilingual_v2
 ```
+
+`TTS_PROVIDER` supports `kokoro`, `deepgram`, and `elevenlabs`. Provider changes take effect after restarting the bot. `GEMINI_SEARCH_MODEL` is fixed in `core/config.py` and is not a secret.
 
 YouTube challenge solving is configured centrally in `core/config.py` with Node
 and the `ejs:github` remote component source. Node 22+ must be installed and
@@ -273,7 +289,7 @@ BandiBot/
 │   ├── clips.py            # Last-30-seconds voice clip export
 │   ├── stt.py              # Deepgram STT wrapper
 │   ├── tts.py              # TTS orchestration, cancellation, activation sound
-│   ├── tts_providers.py    # Kokoro and Deepgram TTS provider adapters
+│   ├── tts_providers.py    # TTS provider interface, adapters, registry, fallback support
 │   └── tts_sources.py      # MixerSource and StandaloneSource audio sources
 │
 ├── music/
@@ -286,6 +302,7 @@ BandiBot/
 │
 ├── bot/
 │   ├── handlers.py         # Text command handling, LLM context, replies
+│   ├── google_search.py    # Gemini Google Search grounding adapter
 │   ├── openai_client.py    # OpenAI SDK wrapper
 │   ├── tool_schemas.py     # OpenAI tool definitions
 │   ├── tool_executor.py    # Shared text/voice tool execution
@@ -308,6 +325,21 @@ BandiBot/
 ├── LICENSE
 └── README.md
 ```
+
+---
+
+## Testing
+
+The test suite is offline and mocks provider behavior; it does not contact
+Discord, Gemini, Deepgram, or ElevenLabs and does not spend API credits.
+
+```powershell
+python -m pytest tests -q
+```
+
+The tests cover provider registration, PCM conversion, provider error parsing,
+automatic ElevenLabs-to-Kokoro fallback, and prevention of repeated speech
+after a partial provider stream.
 
 ---
 
@@ -334,7 +366,7 @@ Discord playback and music-mixing code is provider-independent.
 
 For Kokoro, change `KOKORO_VOICE`, `KOKORO_LANG`, and `KOKORO_SPEED` in `voice/tts_providers.py`.
 
-For Deepgram, change `TTS_MODEL` in `voice/tts_providers.py` to any [Deepgram Aura-2 voice](https://developers.deepgram.com/docs/tts-models). The current Deepgram model constant is `aura-2-javier-es` (Spanish male).
+For Deepgram, change `DEEPGRAM_MODEL` in `voice/tts_providers.py` to any [Deepgram Aura-2 voice](https://developers.deepgram.com/docs/tts-models). The current model is `aura-2-javier-es` (Spanish male).
 
 For ElevenLabs, set `TTS_PROVIDER=elevenlabs`, provide `ELEVENLABS_API_KEY`,
 and optionally change `ELEVENLABS_VOICE_ID` or `ELEVENLABS_MODEL` in `.env`.
