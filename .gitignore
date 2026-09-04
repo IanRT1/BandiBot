@@ -5,6 +5,11 @@
 !.env.example
 youtube_cookies.txt
 
+# --- PRIVATE BOT CONTEXT ---
+# Keep deployment-specific prompts and server lore out of version control.
+data/instructions.txt
+data/server_info.txt
+
 # --- NODE ---
 
 node_modules/

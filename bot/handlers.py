@@ -53,15 +53,23 @@ from music.attachments import get_audio_attachments, handle_audio_attachments
 
 logger = logging.getLogger(__name__)
 
-# Load instructions template once at import time
-with open("data/instructions.txt", "r", encoding="utf-8") as _f:
-    _INSTRUCTIONS_TEMPLATE = _f.read().strip()
+def _load_context_file(filename: str) -> str:
+    """Load private deployment context, falling back to its tracked template."""
+    private_path = os.path.join("data", filename)
+    example_path = os.path.join(
+        "data", filename.removesuffix(".txt") + ".example.txt"
+    )
+    path = private_path if os.path.exists(private_path) else example_path
+    try:
+        with open(path, "r", encoding="utf-8") as context_file:
+            return context_file.read().strip()
+    except OSError as exc:
+        logger.error("Unable to load context file %s: %s", path, exc)
+        return ""
 
-# Load static server lore once at import time
-_SERVER_LORE = ""
-if os.path.exists("data/server_info.txt"):
-    with open("data/server_info.txt", "r", encoding="utf-8") as _f:
-        _SERVER_LORE = _f.read().strip().replace("{model_name}", OPENAI_MODEL)
+
+_INSTRUCTIONS_TEMPLATE = _load_context_file("instructions.txt")
+_SERVER_LORE = _load_context_file("server_info.txt").replace("{model_name}", OPENAI_MODEL)
 
 
 def _strip_bot_mentions(message, client):

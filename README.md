@@ -296,8 +296,8 @@ BandiBot/
 │   └── wake_activation.wav # Wake word confirmation sound
 │
 ├── data/
-│   ├── instructions.txt    # Bot identity and behavior prompt (editable)
-│   └── server_info.txt     # Server history and lore (editable)
+│   ├── instructions.example.txt  # Generic tracked prompt template
+│   └── server_info.example.txt   # Generic tracked server-context template
 │
 ├── __main__.py             # Package entry point
 ├── pyproject.toml          # Package config, bandibot CLI entry point
@@ -315,11 +315,11 @@ BandiBot/
 
 ### Bot Personality
 
-Edit `data/instructions.txt` to change the bot's identity, language rules, tone, and behavior. The file is a plain text prompt loaded at startup. Variables `{bot_display_name}` and `{server_name}` are injected automatically.
+Copy `data/instructions.example.txt` to `data/instructions.txt` and edit the private file to change the bot's identity, language rules, tone, and behavior. The private file is ignored by Git; the generic example is used if it is absent. Variables `{bot_display_name}` and `{server_name}` are injected automatically.
 
 ### Server Lore
 
-Edit `data/server_info.txt` to add your server's history, rules, events, member nicknames, and any other context you want the bot to know. This file is fetched on demand via the `get_server_info` tool when users ask server-specific questions.
+Copy `data/server_info.example.txt` to `data/server_info.txt` and edit the private file to add your server's history, rules, events, member nicknames, and other context. This file is ignored by Git and fetched on demand via the `get_server_info` tool.
 
 ### Wake Word
 

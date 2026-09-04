@@ -1,0 +1,17 @@
+# Generic server context template
+
+## Server
+Nombre: {server_name}
+Propósito: Comunidad de Discord.
+
+## Historia
+Este servidor fue creado por sus administradores y su historia puede documentarse aquí.
+
+## Eventos importantes
+Añade aquí eventos públicos y relevantes del servidor.
+
+## BandiBot
+Bandibot es un asistente de Discord con conversación por texto y voz, reproducción de música por YouTube y búsqueda en Internet. Usa el modelo de lenguaje {model_name}.
+
+## Notas
+Reemplaza este archivo con información privada del servidor en `data/server_info.txt`. Ese archivo está excluido de Git.
