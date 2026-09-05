@@ -394,6 +394,19 @@ class GuildPlayer:
         if not self.is_connected:
             return
 
+        # A track may finish resolving while a standalone activation sound or
+        # TTS response has started. Resolver callbacks enter here directly and
+        # otherwise bypass play_next()'s busy check, causing Discord's
+        # ``Already playing audio`` exception. Put the track back and let the
+        # normal free-voice scheduler start it after the standalone source ends.
+        if self.current is None and self.voice_client.is_playing():
+            logger.info(
+                "[music] resolved track deferred; voice client is busy with standalone audio"
+            )
+            self.queue.appendleft(track)
+            self._schedule_start_when_free()
+            return
+
         if track.error:
             loop = self.voice_client.client.loop
             if self.text_channel:
@@ -492,7 +505,24 @@ class GuildPlayer:
             self._manual_stop = False
             loop.call_soon_threadsafe(self.play_next)
 
-        self.voice_client.play(mixer_source, after=_after)
+        try:
+            self.voice_client.play(mixer_source, after=_after)
+        except Exception as exc:
+            # Discord can reject play() when another standalone source starts
+            # between our busy check and this call. Do not lose the track or
+            # leave a phantom current track behind in that race.
+            if self.current is track:
+                self.current = None
+            self.queue.appendleft(track)
+            logger.error(
+                "[music] failed to start %r; restored it to the queue: %s",
+                track.title,
+                exc,
+            )
+            if self.voice_client.is_playing():
+                self._schedule_start_when_free()
+            return
+
         logger.info(
             f"[music] play() called | "
             f"is_playing={self.voice_client.is_playing()} "

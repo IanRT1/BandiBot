@@ -93,3 +93,11 @@ def test_command_timeout_resets_voice_state(monkeypatch):
 
     assert user_state.reset_calls >= 1
     assert session._pipeline_task is None
+
+
+def test_crypto_error_detection_matches_packet_decryption_errors():
+    from voice.listener import _is_crypto_error
+
+    assert _is_crypto_error(RuntimeError("CryptoError decoding packet data"))
+    assert _is_crypto_error(RuntimeError("failed to decrypt voice packet"))
+    assert not _is_crypto_error(RuntimeError("audio buffer is empty"))

@@ -57,6 +57,11 @@ from voice.audio import (
 logger = logging.getLogger(__name__)
 warnings.filterwarnings("ignore", message=".*tflite runtime.*")
 
+
+def _is_crypto_error(error: Exception) -> bool:
+    message = str(error).lower()
+    return "crypto" in message or "decrypt" in message or "cryptoerror" in message
+
 # ── Toggle ────────────────────────────────────────────────────────────────────
 
 VOICE_ENABLED = True
@@ -325,16 +330,22 @@ class BandiBotSink(voice_recv.AudioSink):
                     self._feed_vad(uid, mono48, u)
 
         except Exception as e:
-            err_str = str(e).lower()
+            if _is_crypto_error(e):
+                # Discord may deliver a burst of undecodable packets while
+                # the receive encryption state is rotating. Log one useful
+                # connection warning and restart the sink once; do not flood
+                # the log with one error per packet.
+                if not self._crypto_error_scheduled:
+                    self._crypto_error_scheduled = True
+                    logger.warning(
+                        "[voice] receive connection packet errors detected; restarting audio sink"
+                    )
+                    asyncio.run_coroutine_threadsafe(
+                        self.gs._restart_sink(), self.gs.loop
+                    )
+                return
+
             logger.error(f"[voice] write error: {e}")
-            if not self._crypto_error_scheduled and (
-                "crypto" in err_str or "decrypt" in err_str or "cryptoerror" in err_str
-            ):
-                self._crypto_error_scheduled = True
-                logger.warning("[voice] crypto error detected — scheduling sink restart")
-                asyncio.run_coroutine_threadsafe(
-                    self.gs._restart_sink(), self.gs.loop
-                )
 
     def _feed_wakeword(self, uid: int, samples16k: np.ndarray, user: discord.User, u: UserCaptureState):
         if uid not in self._oww_buf:

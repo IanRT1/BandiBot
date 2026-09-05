@@ -214,7 +214,8 @@ def main():
     logger.info("[startup] bot initialized; connecting to Discord")
     while retries < MAX_RETRIES:
         try:
-            logger.info("[startup] login attempt %d", retries + 1)
+            if retries:
+                logger.info("[startup] retrying connection (attempt %d)", retries + 1)
             client.run(DISCORD_TOKEN, log_handler=None)
             logger.info("[startup] bot exited cleanly")
             break

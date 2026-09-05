@@ -26,6 +26,12 @@ def test_retrieval_returns_no_context_for_unrelated_question():
     assert retrieve_relevant_chunks(document, "What is the weather today?") == []
 
 
+def test_retrieval_does_not_fuzzy_match_ordinary_sentence_words():
+    document = "# Notes\nBandía is the group in which Ian currently se encuentra."
+
+    assert retrieve_relevant_chunks(document, "¿Cómo te encuentras?") == []
+
+
 def test_retrieval_handles_stt_spelling_variation_for_member_name():
     document = "# Members\nPoyo pretende ser un DJ."
 

@@ -96,6 +96,23 @@ def _terms_match(left: str, right: str) -> bool:
     return False
 
 
+def _proper_name_terms(chunk: str) -> set[str]:
+    """Return capitalized non-heading terms eligible for STT fuzzy matching."""
+    names = set()
+    for line in chunk.splitlines():
+        words = _TOKEN_RE.findall(line)
+        for index, word in enumerate(words):
+            if not word[:1].isupper():
+                continue
+            # Avoid treating a heading's first word as a person/name. Body
+            # lines and bullet entries may legitimately begin with a name.
+            stripped = line.lstrip()
+            if index == 0 and stripped.startswith("#"):
+                continue
+            names.add(_normalize(word))
+    return names
+
+
 def split_context_chunks(document: str) -> list[str]:
     """Split markdown lore into heading-based chunks for retrieval."""
     if not document.strip():
@@ -119,10 +136,15 @@ def retrieve_relevant_chunks(
     scored: list[tuple[float, str]] = []
     for chunk in split_context_chunks(document):
         chunk_terms = _terms(chunk)
+        proper_name_terms = _proper_name_terms(chunk)
         overlap = {
             query_term
             for query_term in query_terms
-            if any(_terms_match(query_term, chunk_term) for chunk_term in chunk_terms)
+            if query_term in chunk_terms
+            or any(
+                _terms_match(query_term, chunk_term)
+                for chunk_term in proper_name_terms
+            )
         }
         if not overlap:
             continue
