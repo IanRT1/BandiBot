@@ -50,4 +50,7 @@ YOUTUBE_JS_RUNTIME: str = "node"
 YOUTUBE_REMOTE_COMPONENTS: str = "ejs:github"
 
 # ── Logging ───────────────────────────────────────────────────
-LOG_LEVEL: str = os.getenv("LOG_LEVEL", "DEBUG").upper()
+LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()
+# Message and response previews remain visible for operational transparency.
+# Set to 0 if deployments should keep conversation contents out of logs.
+LOG_SENSITIVE_CONTENT: bool = os.getenv("LOG_SENSITIVE_CONTENT", "1") == "1"

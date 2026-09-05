@@ -45,12 +45,13 @@ from bot.utils import (
 from bot.tool_schemas import ALL_TOOLS, tools_without_context_lookups
 from bot.openai_client import send_to_openai
 from bot.tool_executor import execute_tool_call, is_music_tool
-from core.config import OPENAI_MODEL
+from core.config import LOG_SENSITIVE_CONTENT, OPENAI_MODEL
 from bot.retrieval import (
     format_retrieved_context,
     load_context_file,
     load_server_lore,
     retrieve_with_confidence,
+    should_retrieve_lore,
 )
 
 from music.player import voice_manager
@@ -80,7 +81,10 @@ def build_context_info(message, client):
     total_members = message.guild.member_count
     current_pst_time = get_current_pst_time()
     current_pst_date = get_current_pst_date()
-    lore_chunks, lore_is_confident = retrieve_with_confidence(_SERVER_LORE, user_message)
+    if should_retrieve_lore(user_message, _SERVER_LORE):
+        lore_chunks, lore_is_confident = retrieve_with_confidence(_SERVER_LORE, user_message)
+    else:
+        lore_chunks, lore_is_confident = [], False
 
     context = dedent(
         f"""
@@ -165,7 +169,10 @@ async def handle_bot_mention(message, client):
     t_start = time.perf_counter()
     total_tokens = 0
 
-    logger.info("[chat] received (%d chars): %s", msg_len, _log_preview(message.content))
+    if LOG_SENSITIVE_CONTENT:
+        logger.info("[chat] received (%d chars): %s", msg_len, _log_preview(message.content))
+    else:
+        logger.info("[chat] received message (%d chars)", msg_len)
 
     # ── Audio attachment shortcut — bypass LLM entirely ───────────────────────
     audio_attachments = get_audio_attachments(message)
@@ -336,10 +343,16 @@ async def handle_bot_mention(message, client):
         await send_response_to_channel(message, response_text)
 
     total_ms = (time.perf_counter() - t_start) * 1000
-    logger.info(
-        "[chat] response sent (%d chars) | llm %.0fms | total %.0fms | response=%s",
-        len(response_text), llm_ms, total_ms, _log_preview(response_text),
-    )
+    if LOG_SENSITIVE_CONTENT:
+        logger.info(
+            "[chat] response sent (%d chars) | llm %.0fms | total %.0fms | response=%s",
+            len(response_text), llm_ms, total_ms, _log_preview(response_text),
+        )
+    else:
+        logger.info(
+            "[chat] response sent (%d chars) | llm %.0fms | total %.0fms",
+            len(response_text), llm_ms, total_ms,
+        )
 
 
 def _log_preview(text: str, limit: int = 160) -> str:

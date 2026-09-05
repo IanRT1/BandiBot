@@ -65,6 +65,8 @@ Every instance is independently hosted by the user. There is no central server, 
 
 ### Reliability and Privacy
 - **Structured runtime logs** with separate startup, chat, voice, STT, TTS, tool, and RAG events
+- **Transparent chat logs** — message and response previews are shown by default; set `LOG_SENSITIVE_CONTENT=0` to hide conversation contents
+- **Quiet local embeddings** — casual or very short messages without a lore/name signal skip semantic retrieval, and Sentence Transformers progress output is disabled
 - **Connection-aware logging** — bursts of Discord voice crypto/decryption packet errors produce one sink-restart warning instead of flooding the log
 - **Quiet startup logging** — normal connection attempts are implicit; retry attempts are logged only after a connection failure
 - **Private deployment context** — personal instructions and server lore stay local and are excluded from Git
@@ -129,13 +131,14 @@ The top three matches are ranked together and capped before being added to the
 prompt. Strong matches omit the redundant `get_server_info` tool so the answer
 uses one LLM call; weak matches keep the tool available as a fallback. The
 embedding model is loaded lazily and the system degrades to BM25 retrieval if
-it is unavailable. Parent section labels, conservative singular/plural and
-section-language matching, and low-information query filtering improve broad
-questions without hardcoding private server names. Live Discord facts such as
-server creation date remain structured context.
+it is unavailable. Parent section labels, conservative singular/plural
+matching, corpus-derived BM25 weighting, and evidence requirements for names,
+headings, or multiple terms improve broad questions without hardcoded language
+lists or private server names. Live Discord facts such as server creation date
+remain structured context.
 
-The retriever normalizes accents, ignores conversational stopwords, and
-tolerates conservative speech-to-text spelling variations such as
+The retriever normalizes accents and tolerates conservative speech-to-text
+spelling variations such as
 `Poyo`/`pollo` and `Beyra`/`Beira`. If no lore matches, the full private file is
 not sent as a fallback; the bot reports that the fact is not documented instead
 of guessing.
@@ -274,6 +277,11 @@ TTS_PROVIDER=kokoro
 ELEVENLABS_API_KEY=your_elevenlabs_api_key
 ELEVENLABS_VOICE_ID=your_voice_id
 ELEVENLABS_MODEL=eleven_multilingual_v2
+
+# Logging: INFO is the clean default; use DEBUG for timing/RAG diagnostics.
+LOG_LEVEL=INFO
+# Set to 0 to hide message/response contents.
+LOG_SENSITIVE_CONTENT=1
 ```
 
 `TTS_PROVIDER` supports `kokoro`, `deepgram`, and `elevenlabs`. Provider changes take effect after restarting the bot. `GEMINI_SEARCH_MODEL` is fixed in `core/config.py` and is not a secret.

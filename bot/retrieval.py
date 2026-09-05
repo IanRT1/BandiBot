@@ -33,36 +33,6 @@ from dataclasses import dataclass
 logger = logging.getLogger(__name__)
 
 _TOKEN_RE = re.compile(r"[\wÀ-ÿ]+", re.UNICODE)
-_STOPWORDS = {
-    "a", "al", "and", "como", "con", "cuál", "cual", "de", "del", "el",
-    "en", "es", "for", "how", "is", "la", "las", "los", "me", "of", "on",
-    "qué", "que", "se", "sobre", "the", "un", "una", "what", "when", "who",
-    "why", "with", "y", "yo", "server", "servidor", "actual", "actualmente",
-    "cambio", "clima", "current", "gano", "ganó", "hoy", "latest", "mas", "más",
-    "premio", "reciente", "tipo", "today", "weather", "esta", "este",
-    "known", "persona", "personas", "por",
-}
-
-# Stopwords are compared after accent normalization, so "qué", "quién",
-# and "quien" behave identically.
-_STOPWORDS = {
-    "".join(
-        char for char in unicodedata.normalize("NFD", word.lower())
-        if unicodedata.category(char) != "Mn"
-    )
-    for word in _STOPWORDS
-} | {"quien", "quienes", "cual", "cuales"}
-_QUERY_SYNONYMS = {
-    "alias": {"apodo"},
-    "apodo": {"alias"},
-    "concepto": {"conceptos"},
-    "conceptos": {"concepto"},
-    "miembro": {"miembros"},
-    "miembros": {"miembro"},
-    "persona": {"miembro", "miembros"},
-    "relacion": {"relaciones"},
-    "relaciones": {"relacion"},
-}
 
 EMBEDDING_MODEL_NAME = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 MAX_RETRIEVED_CHARS = 8000
@@ -122,26 +92,45 @@ def _normalize(text: str) -> str:
 
 def _terms(text: str) -> set[str]:
     return {
-        token for token in _TOKEN_RE.findall(_normalize(text))
-        if len(token) > 2 and token not in _STOPWORDS
+        token for token in _TOKEN_RE.findall(_normalize(text)) if len(token) > 2
     }
 
 
 def _term_list(text: str) -> list[str]:
-    return [
-        token for token in _TOKEN_RE.findall(_normalize(text))
-        if len(token) > 2 and token not in _STOPWORDS
-    ]
+    return [token for token in _TOKEN_RE.findall(_normalize(text)) if len(token) > 2]
 
 
-def _expanded_query_terms(query: str) -> set[str]:
-    """Add conservative language synonyms for section-level questions."""
-    terms = _terms(query)
-    return terms | {
-        synonym
-        for term in terms
-        for synonym in _QUERY_SYNONYMS.get(term, ())
+def should_retrieve_lore(query: str, document: str = "") -> bool:
+    """Return whether a message merits semantic lore retrieval.
+
+    This gate is language-neutral: it does not classify greetings or maintain
+    phrase lists. It keeps direct name/lore matches, including STT name slips,
+    and avoids loading the embedding model for very short messages with no
+    lexical connection to the lore. Longer paraphrases still reach semantic
+    retrieval; the normal tool fallback handles short unmatched questions.
+    """
+    query_terms = _terms(query)
+    if not query_terms:
+        return False
+    if not document:
+        return len(query_terms) >= 3
+
+    document_terms = _terms(document)
+    if query_terms & document_terms:
+        return True
+
+    proper_names = {
+        name
+        for chunk in split_context_chunks(document)
+        for name in _proper_name_terms(chunk)
     }
+    if any(
+        _terms_match(query_term, name)
+        for query_term in query_terms
+        for name in proper_names
+    ):
+        return True
+    return len(query_terms) >= 3
 
 
 def _fold_repeated_letters(term: str) -> str:
@@ -195,10 +184,14 @@ def _proper_name_terms(chunk: str) -> set[str]:
         for index, word in enumerate(words):
             if not word[:1].isupper():
                 continue
-            # Avoid treating a heading's first word as a person/name. Body
-            # lines and bullet entries may legitimately begin with a name.
+            # Avoid treating the first word of a normal sentence as a name.
+            # Bullet entries may legitimately begin with a member name.
             stripped = line.lstrip()
-            if index == 0 and stripped.startswith("#"):
+            if (
+                index == 0
+                and not stripped.startswith(("#", "-", "*"))
+                and len(_normalize(word)) < 4
+            ):
                 continue
             names.add(_normalize(word))
     return names
@@ -217,11 +210,17 @@ def _get_embedding_model():
         # is even loaded.
         os.environ.setdefault("USE_TF", "0")
         os.environ.setdefault("TRANSFORMERS_NO_TF", "1")
+        for library_logger in (
+            "sentence_transformers",
+            "transformers",
+            "huggingface_hub",
+        ):
+            logging.getLogger(library_logger).setLevel(logging.WARNING)
         from sentence_transformers import SentenceTransformer
 
-        logger.info("[rag] loading local embedding model %s", EMBEDDING_MODEL_NAME)
+        logger.debug("[rag] loading local embedding model %s", EMBEDDING_MODEL_NAME)
         _embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
-        logger.info("[rag] local embedding model ready")
+        logger.debug("[rag] local embedding model ready")
     except Exception as exc:
         _embedding_model_failed = True
         logger.warning("[rag] semantic retrieval unavailable; using lexical retrieval: %s", exc)
@@ -261,11 +260,19 @@ def _semantic_scores(query: str, index: _LoreIndex) -> list[float]:
         return [0.0] * len(index.chunks)
 
     if index.embeddings is None:
-        index.embeddings = model.encode(index.chunks, normalize_embeddings=True)
+        index.embeddings = model.encode(
+            index.chunks,
+            normalize_embeddings=True,
+            show_progress_bar=False,
+        )
 
     query_embedding = _query_embedding_cache.get(query)
     if query_embedding is None:
-        query_embedding = model.encode([query], normalize_embeddings=True)[0]
+        query_embedding = model.encode(
+            [query],
+            normalize_embeddings=True,
+            show_progress_bar=False,
+        )[0]
         _query_embedding_cache[query] = query_embedding
         if len(_query_embedding_cache) > 64:
             _query_embedding_cache.pop(next(iter(_query_embedding_cache)))
@@ -321,7 +328,7 @@ def retrieve_relevant_chunks(
     local multilingual embeddings recover paraphrased questions. If the
     optional encoder cannot load, this safely degrades to lexical retrieval.
     """
-    query_terms = _expanded_query_terms(query)
+    query_terms = _terms(query)
     if not query_terms:
         return []
 
@@ -373,23 +380,41 @@ def retrieve_relevant_chunks(
                 for chunk_term in proper_name_terms
             )
         }
+        name_overlap = {
+            query_term
+            for query_term in query_term_list
+            if any(
+                _terms_match(query_term, chunk_name)
+                for chunk_name in proper_name_terms
+            )
+        }
         fuzzy_name_score = len(overlap) / len(query_terms)
         lexical_score = max(
             fuzzy_name_score,
             bm25_scores[index_number] / max_bm25 if max_bm25 else 0.0,
         )
         heading = chunk.splitlines()[0] if chunk.splitlines() else ""
-        if any(
+        heading_match = any(
             _lexical_terms_match(query_term, heading_term)
             for query_term in query_terms
             for heading_term in _terms(heading)
-        ):
+        )
+        if heading_match:
             lexical_score = max(0.35, min(1.0, lexical_score + 0.15))
+        if name_overlap:
+            lexical_score = max(0.5, lexical_score)
+
+        lexical_evidence = (
+            len(overlap) >= 2
+            or any(len(term) >= 5 for term in overlap)
+            or heading_match
+            or bool(name_overlap)
+        )
 
         # Keep lexical matching dominant for proper names and short server
         # lore. Semantic-only matches still need a meaningful similarity.
         combined_score = 0.6 * lexical_score + 0.4 * semantic_score
-        if lexical_score >= min_score or (
+        if (lexical_score >= min_score and lexical_evidence) or (
             allow_semantic_only and semantic_score >= SEMANTIC_MIN_SCORE
         ):
             scored.append(_ScoredChunk(chunk, lexical_score, semantic_score, combined_score))
@@ -425,7 +450,7 @@ def retrieve_with_confidence(
     if not chunks:
         return [], False
 
-    query_terms = _expanded_query_terms(query)
+    query_terms = _terms(query)
     top_chunk = chunks[0]
     proper_names = _proper_name_terms(top_chunk)
     name_match = any(

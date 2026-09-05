@@ -1,7 +1,12 @@
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
-from bot.retrieval import format_retrieved_context, retrieve_relevant_chunks, retrieve_with_confidence
+from bot.retrieval import (
+    format_retrieved_context,
+    retrieve_relevant_chunks,
+    retrieve_with_confidence,
+    should_retrieve_lore,
+)
 from bot.tool_schemas import tools_without_context_lookups
 
 
@@ -18,6 +23,13 @@ The annual tournament started in 2024.
     assert len(chunks) == 1
     assert "annual tournament" in chunks[0]
     assert "gaming community" not in chunks[0]
+
+
+def test_casual_messages_skip_lore_retrieval():
+    document = "# Members\nPoyo is a member."
+
+    assert should_retrieve_lore("Hello, bot!", document) is False
+    assert should_retrieve_lore("¿Quién es Poyo?", document) is True
 
 
 def test_retrieval_returns_no_context_for_unrelated_question():
@@ -40,15 +52,6 @@ def test_retrieval_matches_safe_singular_plural_variants():
 
     assert chunks
     assert chunks[0].startswith("## Conceptos")
-
-
-def test_retrieval_matches_generic_section_synonyms():
-    document = "## Miembros, alias y relaciones\nLos miembros tienen apodos."
-
-    chunks = retrieve_relevant_chunks(document, "¿Qué persona tiene este apodo?")
-
-    assert chunks
-    assert chunks[0].startswith("## Miembros")
 
 
 def test_retrieval_does_not_fuzzy_match_ordinary_sentence_words():
@@ -88,7 +91,7 @@ def test_semantic_retrieval_can_recover_a_paraphrase(monkeypatch):
     import bot.retrieval as retrieval
 
     class FakeEmbeddingModel:
-        def encode(self, texts, normalize_embeddings=True):
+        def encode(self, texts, normalize_embeddings=True, show_progress_bar=False):
             assert normalize_embeddings is True
             vectors = []
             for text in texts:
@@ -140,7 +143,7 @@ def test_semantic_only_match_requires_a_clear_lead(monkeypatch):
     import bot.retrieval as retrieval
 
     class AmbiguousEmbeddingModel:
-        def encode(self, texts, normalize_embeddings=True):
+        def encode(self, texts, normalize_embeddings=True, show_progress_bar=False):
             assert normalize_embeddings is True
             return __import__("numpy").array(
                 [[0.8, 0.6] for _ in texts], dtype=float
@@ -164,7 +167,7 @@ def test_embeddings_are_precomputed_once_per_document(monkeypatch):
         def __init__(self):
             self.calls = []
 
-        def encode(self, texts, normalize_embeddings=True):
+        def encode(self, texts, normalize_embeddings=True, show_progress_bar=False):
             self.calls.append(list(texts))
             return __import__("numpy").array([[1.0, 0.0] for _ in texts], dtype=float)
 

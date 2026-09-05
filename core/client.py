@@ -115,7 +115,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "DEBUG").upper(),
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%H:%M:%S",
 )
