@@ -398,10 +398,10 @@ The suite currently contains 26 tests. The only expected warning is Python's
 `audioop` deprecation warning from the Discord dependency.
 
 GitHub Actions runs the same test suite and a Python compilation check on every
-push to `master` and every pull request targeting `master`. CI currently uses
-Python 3.11 because it has the broadest wheel support for the wake-word and
-audio ML dependencies. It uses placeholder configuration values only; no
-production secrets are required.
+push to `master` and every pull request targeting `master`. CI currently tests
+Python 3.11 and 3.14; 3.11 remains the compatibility baseline while 3.14 is
+being validated as the latest stable target. It uses placeholder configuration
+values only; no production secrets are required.
 
 ---
 
