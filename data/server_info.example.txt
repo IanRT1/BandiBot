@@ -1,17 +1,38 @@
-# Generic server context template
+# Generic Server Context Template
+
+Use this file as a structured Markdown knowledge base for the server's
+documented lore and facts. Keep private deployment-specific information in
+`data/server_info.txt`; that file is excluded from Git.
+
+Organize information under clear headings and subsections. Short, focused
+sections help local RAG retrieve only the relevant context for each question.
+Prefer one topic, event, relationship, or group of aliases per section. Use
+canonical names consistently and list common nicknames explicitly.
 
 ## Server
-Nombre: {server_name}
-Propósito: Comunidad de Discord.
+Name: {server_name}
+Purpose: Discord community.
 
-## Historia
-Este servidor fue creado por sus administradores y su historia puede documentarse aquí.
+## History
+This server was created by its administrators. Document its origin, ownership,
+and important historical details here.
 
-## Eventos importantes
-Añade aquí eventos públicos y relevantes del servidor.
+## Important Events
+Add public and relevant server events here. Use a separate `###` subsection for
+each event and include its date or period when known.
 
 ## BandiBot
-Bandibot es un asistente de Discord con conversación por texto y voz, reproducción de música por YouTube y búsqueda en Internet. Usa el modelo de lenguaje {model_name}.
+BandiBot is a Discord assistant with text and voice conversation, YouTube music
+playback, and web search. It uses the {model_name} language model.
 
-## Notas
-Reemplaza este archivo con información privada del servidor en `data/server_info.txt`. Ese archivo está excluido de Git.
+## General Notes
+Add stable definitions, recurring groups, and other context here.
+
+## Members, Aliases, and Relationships
+- Canonical member name: common nickname or alias
+- Member relationship: documented relationship
+
+## Privacy and Accuracy
+- Include only information that the bot is allowed to use in responses.
+- Mark uncertain or deliberately private details clearly.
+- Do not add API keys, tokens, passwords, or other secrets.
