@@ -115,6 +115,8 @@ MUSIC_TOOLS = [
             "description": (
                 "Remove one or more songs from the queue without affecting playback. "
                 "Use ONLY when the user explicitly asks to remove, delete, clear, drop, or take a track out of the queue. "
+                "If the user says to remove/quit the song that is currently playing, use skip_track instead. "
+                "Phrases like 'quitar la canción' or 'remove this song' usually mean skip_track when no queue position is given. "
                 "Do NOT use for a bare song title or artist mention; bare song requests should usually be play_music. "
                 "Can reference tracks by position number(s), by name/partial name, "
                 "or by recency. Does NOT affect the currently playing track."
@@ -163,7 +165,11 @@ MUSIC_TOOLS = [
         "type": "function",
         "function": {
             "name": "skip_track",
-            "description": "Skip the currently playing track and move to the next in queue.",
+            "description": (
+                "Skip the currently playing track and move to the next in queue. "
+                "Use this when the user asks to skip, pass, or remove the song currently playing "
+                "(for example, 'quitar la canción', 'quita esta canción', or 'remove this song')."
+            ),
             "parameters": {"type": "object", "properties": {}},
         },
     },
@@ -246,8 +252,8 @@ GET_SERVER_INFO_TOOL = [
             "name": "get_server_info",
             "description": (
                 "Get information about this Discord server from its history and lore document. "
-                "Use this when the user asks something about the server — its history, rules, "
-                "events, or any other server-specific knowledge. "
+                "Use this only when relevant server lore was not already provided in the context. "
+                "It retrieves the server history, rules, events, or other server-specific knowledge. "
                 "Pass the user's question so the response can be tailored to what was asked."
             ),
             "parameters": {
@@ -291,3 +297,20 @@ WEB_SEARCH_TOOL = [
 ]
 
 ALL_TOOLS = MUSIC_TOOLS + GET_MEMBER_ACTIVITY_TOOL + GET_SERVER_INFO_TOOL + WEB_SEARCH_TOOL
+
+
+def tools_without_server_info():
+    """Return tools for prompts whose server lore was already retrieved."""
+    return [
+        tool for tool in ALL_TOOLS
+        if tool["function"]["name"] != "get_server_info"
+    ]
+
+
+def tools_without_context_lookups():
+    """Remove lore/activity lookups when local lore already answers the query."""
+    excluded = {"get_server_info", "get_member_activity"}
+    return [
+        tool for tool in ALL_TOOLS
+        if tool["function"]["name"] not in excluded
+    ]

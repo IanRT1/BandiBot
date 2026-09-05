@@ -181,10 +181,25 @@ async def _handle_delete_track(message, args):
     player = voice_manager.get_player(message.guild)
     queue_list = list(player.queue)
     positions = args.get("positions")
+    track_name = args.get("track_name")
+
+    # Natural language such as "quitar la canción" refers to the active song
+    # unless the user explicitly identifies an upcoming queue item.  The
+    # model normally selects skip_track after the schema guidance, but keep
+    # this guard here so a delete_track call cannot silently leave playback
+    # unchanged when the intent is clearly to skip the current track.
+    if (
+        player.current
+        and not positions
+        and not track_name
+        and _has_current_track_skip_intent(message)
+    ):
+        return await voice_manager.skip(message.guild)
+
     if not positions:
         position = args.get("position")
         if position is None:
-            query = args.get("track_name", "").lower()
+            query = (track_name or "").lower()
             if query in ("last", "last song", "última", "última canción"):
                 position = len(queue_list)
             else:
@@ -296,6 +311,30 @@ def _has_explicit_delete_intent(message) -> bool:
         "saca", "sacar",
     )
     return any(word in lowered for word in delete_words)
+
+
+def _has_current_track_skip_intent(message) -> bool:
+    """Return true for remove/skip wording aimed at the active track."""
+    content = getattr(message, "content", "")
+    if not content:
+        return False
+    lowered = content.lower()
+
+    # Queue-specific wording means the user wants delete_track instead.
+    if re.search(r"\b(?:queue|cola)\b", lowered):
+        return False
+    if re.search(r"\b(?:position|posici[oó]n|number|n[uú]mero)\b", lowered):
+        return False
+
+    return any(
+        re.search(pattern, lowered)
+        for pattern in (
+            r"\bquitar(?:me)?\s+(?:la\s+)?canci[oó]n\b",
+            r"\bquita(?:me)?\s+(?:la\s+)?canci[oó]n\b",
+            r"\bsaca(?:r)?\s+(?:la\s+)?canci[oó]n\b",
+            r"\b(?:remove|take out|take off)\s+(?:the\s+)?(?:current|this|playing)\s*(?:song|track)?\b",
+        )
+    )
 
 
 def _has_explicit_stop_intent(message) -> bool:

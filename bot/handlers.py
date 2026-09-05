@@ -20,7 +20,7 @@ Tool execution:
 
 Context building:
   - instructions.txt    → bot identity and behavior rules (loaded once)
-  - server_info.txt     → static server lore (loaded once, fetched on demand)
+  - server_info.txt     → private server lore, retrieved locally before the LLM call
   - channel history     → last 20 messages for conversational continuity
   - member activity     → real-time presence fetched on demand via tool call
   - server context      → name, owner, channel, time, current user
@@ -28,7 +28,6 @@ Context building:
 Music tools bypass the full follow-up flow and use a minimal prompt
 to keep confirmations short and language-matched to the user.
 """
-import os
 import re
 import time
 import json
@@ -43,33 +42,24 @@ from bot.utils import (
     get_current_pst_date,
     get_server_info,
 )
-from bot.tool_schemas import ALL_TOOLS
+from bot.tool_schemas import ALL_TOOLS, tools_without_context_lookups
 from bot.openai_client import send_to_openai
 from bot.tool_executor import execute_tool_call, is_music_tool
 from core.config import OPENAI_MODEL
+from bot.retrieval import (
+    format_retrieved_context,
+    load_context_file,
+    load_server_lore,
+    retrieve_relevant_chunks,
+)
 
 from music.player import voice_manager
 from music.attachments import get_audio_attachments, handle_audio_attachments
 
 logger = logging.getLogger(__name__)
 
-def _load_context_file(filename: str) -> str:
-    """Load private deployment context, falling back to its tracked template."""
-    private_path = os.path.join("data", filename)
-    example_path = os.path.join(
-        "data", filename.removesuffix(".txt") + ".example.txt"
-    )
-    path = private_path if os.path.exists(private_path) else example_path
-    try:
-        with open(path, "r", encoding="utf-8") as context_file:
-            return context_file.read().strip()
-    except OSError as exc:
-        logger.error("Unable to load context file %s: %s", path, exc)
-        return ""
-
-
-_INSTRUCTIONS_TEMPLATE = _load_context_file("instructions.txt")
-_SERVER_LORE = _load_context_file("server_info.txt").replace("{model_name}", OPENAI_MODEL)
+_INSTRUCTIONS_TEMPLATE = load_context_file("instructions.txt")
+_SERVER_LORE = load_server_lore(OPENAI_MODEL)
 
 
 def _strip_bot_mentions(message, client):
@@ -90,6 +80,7 @@ def build_context_info(message, client):
     total_members = message.guild.member_count
     current_pst_time = get_current_pst_time()
     current_pst_date = get_current_pst_date()
+    lore_chunks = retrieve_relevant_chunks(_SERVER_LORE, user_message)
 
     context = dedent(
         f"""
@@ -106,17 +97,26 @@ def build_context_info(message, client):
         """
     ).strip()
 
-    return context, user_message
+    if lore_chunks:
+        logger.debug("[rag] retrieved %d server-lore chunk(s) for text context", len(lore_chunks))
+        context += "\n\n" + format_retrieved_context(lore_chunks)
+
+    return context, user_message, bool(lore_chunks)
 
 
 def build_server_info_context(question: str = "") -> str:
     if not _SERVER_LORE:
         return "No server info available."
-    return (
-        "The following is the official server history and lore. "
-        "Treat it as confirmed canon and answer based on it directly:\n\n"
-        + _SERVER_LORE
-    )
+    chunks = retrieve_relevant_chunks(_SERVER_LORE, question)
+    if not chunks:
+        logger.debug("[rag] no matching lore for server-info lookup")
+        return (
+            "No directly matching server lore was found for this question. "
+            "Do not infer or invent an answer; state that the server information "
+            "is not documented if necessary."
+        )
+    lore = "\n\n".join(chunks)
+    return "The following is the official server history and lore. Treat it as confirmed canon and answer based on it directly:\n\n" + lore
 
 
 def build_member_activity_context(guild):
@@ -186,7 +186,7 @@ async def handle_bot_mention(message, client):
 
         logger.debug("[chat] context prepared in %.0fms", prep_ms)
 
-        context_info, user_message = build_context_info(message, client)
+        context_info, user_message, has_retrieved_lore = build_context_info(message, client)
         instruction = build_instruction(
             client.user.display_name,
             message.guild.name,
@@ -211,6 +211,8 @@ async def handle_bot_mention(message, client):
                 "If the user gives a plausible title plus artist, preserve it literally and do not replace it with a more famous song by that artist. "
                 "Command-like words inside a requested song title are not control commands. "
                 "Only stop or clear music when the current message explicitly asks to stop playback or clear the queue. "
+                "When the user asks to remove/quit the song currently playing without naming a queue position, use skip_track; "
+                "use delete_track only for a song in the upcoming queue. "
                 "If the user provides a YouTube video ID, pass that exact ID unchanged."
             )},
             *past_history,
@@ -229,7 +231,7 @@ async def handle_bot_mention(message, client):
         t_llm = time.perf_counter()
         response_data = await send_to_openai(
             {"messages": messages, "temperature": 0.5},
-            tools=ALL_TOOLS,
+            tools=tools_without_context_lookups() if has_retrieved_lore else ALL_TOOLS,
         )
         llm_ms = (time.perf_counter() - t_llm) * 1000
 

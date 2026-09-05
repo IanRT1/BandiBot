@@ -40,6 +40,8 @@ Every instance is independently hosted by the user. There is no central server, 
 - **Mid-speech interruption** — trigger the wake word while the bot is speaking to immediately cancel and start a new command
 - **Per-user isolation** — only the user who triggered the wake word has their audio captured; other speakers are ignored
 - **Voice music feedback** — voice-detected song requests post the heard query first, then replace that same message with the final queued or now-playing result
+- **Timeout recovery** — STT, voice-command, and TTS stages have independent timeouts and reset processing state when a provider hangs
+- **Clean voice lifecycle** — failed or timed-out commands release their pipeline state so later wake-word requests are not permanently blocked
 
 ### Music
 - **YouTube playback** via yt-dlp and FFmpeg with loudness normalization
@@ -55,9 +57,16 @@ Every instance is independently hosted by the user. There is no central server, 
 - Full conversational LLM responses via @mention
 - Music control via natural language
 - Google Search-grounded answers for current web questions
+- Local RAG retrieval for server lore, avoiding an extra LLM tool-call round trip when relevant context is found
 - Server member activity and presence lookup
 - Private server history and lore via local `server_info.txt`
 - Recent channel history included in every request for conversational continuity
+
+### Reliability and Privacy
+- **Structured runtime logs** with separate startup, chat, voice, STT, TTS, tool, and RAG events
+- **Private deployment context** — personal instructions and server lore stay local and are excluded from Git
+- **Generic tracked templates** — new deployments can use safe `*.example.txt` files without exposing server-specific information
+- **Offline automated tests** for RAG, music intent routing, voice timeout recovery, TTS fallback, tool errors, and repository hygiene
 
 ---
 
@@ -69,6 +78,7 @@ Discord Gateway
       ├── on_message (@mention)
       │         └── bot/handlers.py
       │                   ├── LLM (bot/openai_client.py)
+      │                   ├── Local lore RAG (bot/retrieval.py)
       │                   ├── Tool schemas (bot/tool_schemas.py)
       │                   └── Tool execution (bot/tool_executor.py)
       │                             ├── music/player.py (VoiceManager)
@@ -101,6 +111,19 @@ Discord Gateway
 **Music starts voice listening** — when a text command makes the bot join voice for music playback, `music/player.py` explicitly starts the wake-word listener on the same voice client. The Discord voice-state event also starts listening, and the listener manager de-duplicates repeated starts.
 
 **Private deployment context** — personal instructions and server lore are ignored by Git. Generic `.example.txt` templates are tracked and used automatically when the private files are absent.
+
+**Local RAG for server lore** — server-lore files are split into sections and searched locally before the LLM request. Relevant excerpts are added to the prompt, and the `get_server_info` tool is omitted for that request so the answer can be generated in one LLM call. Live Discord facts such as server creation date remain structured context.
+
+The retriever is intentionally lightweight lexical RAG rather than a hosted or
+vector-embedding service. It normalizes accents, ignores conversational
+stopwords, and tolerates conservative speech-to-text spelling variations such
+as `Poyo`/`pollo` and `Beyra`/`Beira`. If no lore matches, the full private file
+is not sent as a fallback; the bot reports that the fact is not documented
+instead of guessing.
+
+**Shared tool execution** — text and voice commands use the same tool executor.
+Music intent rules distinguish skipping the currently playing song from deleting
+an upcoming queue item, including Spanish phrasing such as `quitar la canción`.
 
 ---
 
@@ -303,6 +326,7 @@ BandiBot/
 ├── bot/
 │   ├── handlers.py         # Text command handling, LLM context, replies
 │   ├── google_search.py    # Gemini Google Search grounding adapter
+│   ├── retrieval.py        # Local RAG chunking and lexical retrieval
 │   ├── openai_client.py    # OpenAI SDK wrapper
 │   ├── tool_schemas.py     # OpenAI tool definitions
 │   ├── tool_executor.py    # Shared text/voice tool execution
@@ -315,6 +339,13 @@ BandiBot/
 ├── data/
 │   ├── instructions.example.txt  # Generic tracked prompt template
 │   └── server_info.example.txt   # Generic tracked server-context template
+│
+├── tests/
+│   ├── test_retrieval.py           # Local RAG and lore fallback tests
+│   ├── test_music_tools.py         # Music intent and tool safety tests
+│   ├── test_tts.py                 # TTS providers, conversion, and fallback
+│   ├── test_voice_timeouts.py      # STT/LLM timeout state recovery
+│   └── test_repository_hygiene.py  # Private files and cache ignore rules
 │
 ├── __main__.py             # Package entry point
 ├── pyproject.toml          # Package config, bandibot CLI entry point
@@ -337,9 +368,21 @@ Discord, Gemini, Deepgram, or ElevenLabs and does not spend API credits.
 python -m pytest tests -q
 ```
 
-The tests cover provider registration, PCM conversion, provider error parsing,
-automatic ElevenLabs-to-Kokoro fallback, and prevention of repeated speech
-after a partial provider stream.
+The tests cover:
+
+- Local RAG relevance, accent normalization, STT name variations, and safe
+  unmatched-query fallback
+- Music routing between skipping the active song and deleting queued songs
+- Queue/tool safety, including blocked stop requests, unknown tools, and
+  contained tool exceptions
+- STT and LLM timeout recovery so voice users are not left permanently locked
+- TTS provider registration, PCM conversion, error parsing, automatic
+  ElevenLabs-to-Kokoro fallback, and prevention of repeated speech after a
+  partial provider stream
+- Private context separation and ignored test-cache directories
+
+The suite currently contains 22 tests. The only expected warning is Python's
+`audioop` deprecation warning from the Discord dependency.
 
 ---
 
@@ -351,7 +394,7 @@ Copy `data/instructions.example.txt` to `data/instructions.txt` and edit the pri
 
 ### Server Lore
 
-Copy `data/server_info.example.txt` to `data/server_info.txt` and edit the private file to add your server's history, rules, events, member nicknames, and other context. This file is ignored by Git and fetched on demand via the `get_server_info` tool.
+Copy `data/server_info.example.txt` to `data/server_info.txt` and edit the private file to add your server's history, rules, events, member nicknames, and other context. This file is ignored by Git and retrieved locally as relevant context before the LLM request. Keep lore organized under Markdown headings so retrieval can return focused sections. The `get_server_info` tool remains available as a controlled fallback when local retrieval does not answer a request.
 
 ### Wake Word
 

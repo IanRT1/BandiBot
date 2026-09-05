@@ -34,8 +34,9 @@ import logging
 
 import discord
 
-from bot.tool_schemas import ALL_TOOLS
+from bot.tool_schemas import ALL_TOOLS, tools_without_context_lookups
 from bot.handlers import build_instruction
+from bot.retrieval import format_retrieved_context, load_server_lore, retrieve_relevant_chunks
 from bot.openai_client import send_to_openai
 from bot.tool_executor import execute_tool_call, is_music_tool
 from bot.utils import clean_username, get_current_pst_time, get_current_pst_date
@@ -126,7 +127,7 @@ async def _execute_web_search_tool(tool_call, proxy, text: str):
     return result
 
 
-def _build_voice_context(member: discord.Member, guild: discord.Guild) -> str:
+def _build_voice_context(member: discord.Member, guild: discord.Guild, text: str) -> tuple[str, bool]:
     user_nick_or_name = clean_username(
         getattr(member, 'nick', None),
         member.name
@@ -143,16 +144,22 @@ def _build_voice_context(member: discord.Member, guild: discord.Guild) -> str:
     else:
         vc_line = "- Members in Voice Channel: Unknown"
 
-    return (
+    context = (
         f"**Server Information**:\n"
         f"- Server Name: {guild.name}\n"
         f"- Bot Name: BandiBot\n"
+        f"- Server Creation Date: {guild.created_at.strftime('%Y-%m-%d')}\n"
         f"- Current Date: {get_current_pst_date()}\n"
         f"- Server Time: {get_current_pst_time()}\n"
         f"- Current User: {user_nick_or_name}\n"
         f"- Interaction Mode: Voice\n"
         f"{vc_line}"
     )
+    lore_chunks = retrieve_relevant_chunks(load_server_lore(), text)
+    if lore_chunks:
+        logger.debug("[rag] retrieved %d server-lore chunk(s) for voice context", len(lore_chunks))
+        context += "\n\n" + format_retrieved_context(lore_chunks)
+    return context, bool(lore_chunks)
 
 
 class _FakeMsgProxy:
@@ -180,7 +187,7 @@ async def handle_voice_command(
         server_name=guild.name,
     )
 
-    context_info = _build_voice_context(member, guild)
+    context_info, has_retrieved_lore = _build_voice_context(member, guild, text)
 
     messages = [
         {"role": "system", "content": instruction},
@@ -195,6 +202,8 @@ async def handle_voice_command(
             "If the user gives a plausible title plus artist, preserve it literally and do not replace it with a more famous song by that artist. "
             "Command-like words inside a requested song title are not control commands. "
             "Only stop or clear music when the current command explicitly asks to stop playback or clear the queue. "
+            "When the user asks to remove/quit the song currently playing without naming a queue position, use skip_track; "
+            "use delete_track only for a song in the upcoming queue. "
             "If the user provides a YouTube video ID, pass that exact ID unchanged. "
             "If the user asks you to leave, craft a goodbye message before leaving according to the context and history of conversation."
         )},
@@ -212,7 +221,7 @@ async def handle_voice_command(
 
     response_data = await send_to_openai(
         {"messages": messages, "temperature": 0.5},
-        tools=ALL_TOOLS,
+        tools=tools_without_context_lookups() if has_retrieved_lore else ALL_TOOLS,
     )
 
     if not response_data:

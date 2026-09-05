@@ -60,6 +60,9 @@ warnings.filterwarnings("ignore", message=".*tflite runtime.*")
 # ── Toggle ────────────────────────────────────────────────────────────────────
 
 VOICE_ENABLED = True
+STT_TIMEOUT_SECONDS = 30
+VOICE_COMMAND_TIMEOUT_SECONDS = 120
+TTS_TIMEOUT_SECONDS = 120
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -763,7 +766,16 @@ class GuildVoiceSession:
         async def _pipeline():
             current_task = asyncio.current_task()
             try:
-                text = await transcribe(wav_bytes)
+                try:
+                    text = await asyncio.wait_for(
+                        transcribe(wav_bytes), timeout=STT_TIMEOUT_SECONDS
+                    )
+                except asyncio.TimeoutError:
+                    logger.error(
+                        "[stt] request timed out after %ds; resetting voice state",
+                        STT_TIMEOUT_SECONDS,
+                    )
+                    return
                 if not text or len(text.strip()) < 2:
                     logger.info("[voice] ✗ empty transcription — resetting")
                     if self.sink:
@@ -783,10 +795,20 @@ class GuildVoiceSession:
                     self._pipeline_is_music = True
                     if current_task:
                         self._protected_pipeline_tasks.add(current_task)
-                response_text, should_leave = await handle_voice_command(
-                    text=text, member=member, guild=self.guild,
-                    client=self.client, history=session.get_history(),
-                )
+                try:
+                    response_text, should_leave = await asyncio.wait_for(
+                        handle_voice_command(
+                            text=text, member=member, guild=self.guild,
+                            client=self.client, history=session.get_history(),
+                        ),
+                        timeout=VOICE_COMMAND_TIMEOUT_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    logger.error(
+                        "[voice] command timed out after %ds; resetting voice state",
+                        VOICE_COMMAND_TIMEOUT_SECONDS,
+                    )
+                    return
                 elapsed = (time.perf_counter() - t) * 1000
                 self._pipeline_is_music = not bool(response_text)
 
@@ -802,7 +824,23 @@ class GuildVoiceSession:
 
                 if response_text:
                     session.add("assistant", response_text)
-                    await speak(self._voice_client, response_text, guild=self.guild, clip_buffer=self.clip_buffer)
+                    try:
+                        await asyncio.wait_for(
+                            speak(
+                                self._voice_client,
+                                response_text,
+                                guild=self.guild,
+                                clip_buffer=self.clip_buffer,
+                            ),
+                            timeout=TTS_TIMEOUT_SECONDS,
+                        )
+                    except asyncio.TimeoutError:
+                        logger.error(
+                            "[tts] speech timed out after %ds; cancelling and resetting voice state",
+                            TTS_TIMEOUT_SECONDS,
+                        )
+                        cancel_tts(self._voice_client)
+                        return
                     if should_leave:
                         await asyncio.sleep(1)
                         logger.info("[voice] → leaving voice channel")
