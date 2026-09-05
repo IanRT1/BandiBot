@@ -142,6 +142,10 @@ spelling variations for names. If no lore matches, the full private file is
 not sent as a fallback; the bot reports that the fact is not documented instead
 of guessing.
 
+Short follow-up questions inherit the latest user question for retrieval, so a
+sequence such as "Who created BandiBot?" followed by "When?" can retrieve the
+same focused lore section without storing permanent conversation memory.
+
 **Shared tool execution** — text and voice commands use the same tool executor.
 Music intent rules distinguish skipping the currently playing song from deleting
 an upcoming queue item, including Spanish phrasing such as `quitar la canción`.
@@ -412,7 +416,7 @@ The tests cover:
   partial provider stream
 - Private context separation and ignored test-cache directories
 
-The suite currently contains 36 tests. The only expected warning is Python's
+The suite currently contains 39 tests. The only expected warning is Python's
 `audioop` deprecation warning from the Discord dependency.
 
 GitHub Actions runs the same test suite and a Python compilation check on every

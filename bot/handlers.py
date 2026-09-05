@@ -54,6 +54,7 @@ from bot.retrieval import (
     format_retrieved_context,
     load_context_file,
     load_server_lore,
+    build_retrieval_query,
     retrieve_with_confidence,
     should_retrieve_lore,
 )
@@ -74,7 +75,7 @@ def _strip_bot_mentions(message, client):
     return content.strip()
 
 
-def build_context_info(message, client):
+def build_context_info(message, client, history_messages=None):
     user_nick_or_name = clean_username(message.author.nick, message.author.name)
     server_name = message.guild.name
     channel_name = message.channel.name
@@ -85,8 +86,11 @@ def build_context_info(message, client):
     total_members = message.guild.member_count
     current_pst_time = get_current_pst_time()
     current_pst_date = get_current_pst_date()
-    if should_retrieve_lore(user_message, _SERVER_LORE):
-        lore_chunks, lore_is_confident = retrieve_with_confidence(_SERVER_LORE, user_message)
+    retrieval_query = build_retrieval_query(user_message, history_messages)
+    if should_retrieve_lore(retrieval_query, _SERVER_LORE):
+        lore_chunks, lore_is_confident = retrieve_with_confidence(
+            _SERVER_LORE, retrieval_query
+        )
     else:
         lore_chunks, lore_is_confident = [], False
 
@@ -202,7 +206,7 @@ async def handle_bot_mention(message, client):
             user_message,
             has_retrieved_lore,
             has_lore_context,
-        ) = build_context_info(message, client)
+        ) = build_context_info(message, client, history_messages)
         instruction = build_instruction(
             client.user.display_name,
             message.guild.name,

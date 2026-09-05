@@ -133,6 +133,24 @@ def should_retrieve_lore(query: str, document: str = "") -> bool:
     return len(query_terms) >= 3
 
 
+def build_retrieval_query(query: str, history: list[dict] | None = None) -> str:
+    """Add the latest user turn when a short message is a likely follow-up."""
+    if not history or len(_TOKEN_RE.findall(_normalize(query))) > 2:
+        return query
+
+    previous_user_message = next(
+        (
+            item["content"]
+            for item in reversed(history)
+            if item.get("role") == "user" and item.get("content")
+        ),
+        "",
+    )
+    if not previous_user_message:
+        return query
+    return f"{previous_user_message}\n{query}"
+
+
 def _fold_repeated_letters(term: str) -> str:
     """Fold repeated letters for small speech-to-text spelling slips."""
     return re.sub(r"(.)\1+", r"\1", term)
@@ -400,20 +418,26 @@ def retrieve_relevant_chunks(
             for heading_term in _terms(heading)
         )
         if heading_match:
-            lexical_score = max(0.35, min(1.0, lexical_score + 0.15))
+            # A direct heading match is a focused entity/profile match; rank
+            # it above incidental mentions in historical prose.
+            lexical_score = max(0.75, min(1.0, lexical_score + 0.15))
         if name_overlap:
             lexical_score = max(0.5, lexical_score)
 
         lexical_evidence = (
             len(overlap) >= 2
-            or any(len(term) >= 5 for term in overlap)
+            or any(len(term) >= 4 for term in overlap)
             or heading_match
             or bool(name_overlap)
         )
 
         # Keep lexical matching dominant for proper names and short server
         # lore. Semantic-only matches still need a meaningful similarity.
-        combined_score = 0.6 * lexical_score + 0.4 * semantic_score
+        combined_score = (
+            0.6 * lexical_score
+            + 0.4 * semantic_score
+            + (0.05 if heading_match else 0.0)
+        )
         if (lexical_score >= min_score and lexical_evidence) or (
             allow_semantic_only and semantic_score >= SEMANTIC_MIN_SCORE
         ):

@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from bot.retrieval import (
+    build_retrieval_query,
     format_retrieved_context,
     retrieve_relevant_chunks,
     retrieve_with_confidence,
@@ -34,6 +35,32 @@ def test_casual_messages_skip_lore_retrieval():
 
     assert should_retrieve_lore("Hello, bot!", document) is False
     assert should_retrieve_lore("¿Quién es MemberAlpha?", document) is True
+
+
+def test_short_follow_up_inherits_the_previous_user_question():
+    history = [{"role": "user", "content": "¿Quién es el creador de BandiBot?"}]
+
+    query = build_retrieval_query("¿Cuándo?", history)
+
+    assert "creador de BandiBot" in query
+    assert "¿Cuándo?" in query
+
+
+def test_creator_question_can_match_a_single_strong_lore_term():
+    document = "### Ian — creator\nIan creó y desarrolla BandiBot."
+
+    chunks = retrieve_relevant_chunks(document, "¿Quién te creó?")
+
+    assert chunks
+    assert chunks[0].startswith("### Ian")
+
+
+def test_long_message_is_not_augmented_with_history():
+    history = [{"role": "user", "content": "A previous unrelated question"}]
+
+    assert build_retrieval_query("Tell me the complete server history", history) == (
+        "Tell me the complete server history"
+    )
 
 
 def test_retrieval_returns_no_context_for_unrelated_question():
