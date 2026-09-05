@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Python tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt pytest
+
+      - name: Compile Python sources
+        run: python -m compileall -q bot core music voice tests
+
+      - name: Run tests
+        env:
+          # Tests mock external services; these placeholders only satisfy the
+          # startup configuration validation during module imports.
+          DISCORD_TOKEN: ci-placeholder
+          OPENAI_API_KEY: ci-placeholder
+          DEEPGRAM_API_KEY: ci-placeholder
+          GEMINI_API_KEY: ci-placeholder
+        run: python -m pytest tests -q -p no:cacheprovider

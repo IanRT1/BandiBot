@@ -384,6 +384,10 @@ The tests cover:
 The suite currently contains 22 tests. The only expected warning is Python's
 `audioop` deprecation warning from the Discord dependency.
 
+GitHub Actions runs the same test suite and a Python compilation check on every
+push to `master` and every pull request targeting `master`. CI uses placeholder
+configuration values only; no production secrets are required.
+
 ---
 
 ## Customization
