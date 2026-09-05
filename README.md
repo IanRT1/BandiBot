@@ -51,6 +51,7 @@ Every instance is independently hosted by the user. There is no central server, 
 - **Single song queuing** — resolved on the spot before playing
 - **Bulk song queuing** — multiple songs or YouTube playlist URLs queued instantly as placeholders, resolved one track ahead in the background as songs play
 - **Graceful error handling** — unresolvable tracks are skipped with a notification at playback time
+- **Playback race recovery** — tracks that finish resolving while activation/TTS audio is playing wait safely instead of causing Discord's `Already playing audio` error; failed starts restore the track to the queue
 - **Now Playing embed** with live timer, album art banner, next track preview, and interactive button controls (previous, play/pause, skip, stop, queue, loop, shuffle, copy link)
 
 ### Text Commands
@@ -64,6 +65,8 @@ Every instance is independently hosted by the user. There is no central server, 
 
 ### Reliability and Privacy
 - **Structured runtime logs** with separate startup, chat, voice, STT, TTS, tool, and RAG events
+- **Connection-aware logging** — bursts of Discord voice crypto/decryption packet errors produce one sink-restart warning instead of flooding the log
+- **Quiet startup logging** — normal connection attempts are implicit; retry attempts are logged only after a connection failure
 - **Private deployment context** — personal instructions and server lore stay local and are excluded from Git
 - **Generic tracked templates** — new deployments can use safe `*.example.txt` files without exposing server-specific information
 - **Offline automated tests** for RAG, music intent routing, voice timeout recovery, TTS fallback, tool errors, and repository hygiene
@@ -110,6 +113,11 @@ Discord Gateway
 
 **Music starts voice listening** — when a text command makes the bot join voice for music playback, `music/player.py` explicitly starts the wake-word listener on the same voice client. The Discord voice-state event also starts listening, and the listener manager de-duplicates repeated starts.
 
+**Playback state recovery** — resolver callbacks re-check whether Discord is
+already playing standalone activation/TTS audio. If a playback start is
+rejected, the track is restored to the queue and phantom `current` state is
+cleared so later music commands continue normally.
+
 **Private deployment context** — personal instructions and server lore are ignored by Git. Generic `.example.txt` templates are tracked and used automatically when the private files are absent.
 
 **Local RAG for server lore** — server-lore files are split into sections and searched locally before the LLM request. Relevant excerpts are added to the prompt, and the `get_server_info` tool is omitted for that request so the answer can be generated in one LLM call. Live Discord facts such as server creation date remain structured context.
@@ -124,6 +132,10 @@ instead of guessing.
 **Shared tool execution** — text and voice commands use the same tool executor.
 Music intent rules distinguish skipping the currently playing song from deleting
 an upcoming queue item, including Spanish phrasing such as `quitar la canción`.
+
+**Voice receive recovery** — bursts of Discord crypto/decryption failures are
+grouped into one warning and trigger a receive-sink restart, while unrelated
+voice processing errors remain visible individually.
 
 ---
 
@@ -343,6 +355,7 @@ BandiBot/
 ├── tests/
 │   ├── test_retrieval.py           # Local RAG and lore fallback tests
 │   ├── test_music_tools.py         # Music intent and tool safety tests
+│   ├── test_music_player.py        # Playback race and queue restoration tests
 │   ├── test_tts.py                 # TTS providers, conversion, and fallback
 │   ├── test_voice_timeouts.py      # STT/LLM timeout state recovery
 │   └── test_repository_hygiene.py  # Private files and cache ignore rules
@@ -381,7 +394,7 @@ The tests cover:
   partial provider stream
 - Private context separation and ignored test-cache directories
 
-The suite currently contains 22 tests. The only expected warning is Python's
+The suite currently contains 26 tests. The only expected warning is Python's
 `audioop` deprecation warning from the Discord dependency.
 
 GitHub Actions runs the same test suite and a Python compilation check on every
