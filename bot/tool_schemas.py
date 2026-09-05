@@ -314,3 +314,20 @@ def tools_without_context_lookups():
         tool for tool in ALL_TOOLS
         if tool["function"]["name"] not in excluded
     ]
+
+
+def tools_without_web_search():
+    """Keep normal tools while preventing server-lore requests from going online."""
+    return [
+        tool for tool in ALL_TOOLS
+        if tool["function"]["name"] != "web_search"
+    ]
+
+
+def tools_without_context_lookups_or_web_search():
+    """Use when local lore answers the request and web search is irrelevant."""
+    excluded = {"get_server_info", "get_member_activity", "web_search"}
+    return [
+        tool for tool in ALL_TOOLS
+        if tool["function"]["name"] not in excluded
+    ]

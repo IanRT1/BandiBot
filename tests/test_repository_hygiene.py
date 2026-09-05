@@ -15,8 +15,8 @@ def test_example_context_files_do_not_contain_private_member_lore():
     instructions = (ROOT / "data/instructions.example.txt").read_text(encoding="utf-8")
     server_info = (ROOT / "data/server_info.example.txt").read_text(encoding="utf-8")
 
-    private_names = ("DJ Bonk", "Trabis", "Poyo", "Beyra", "Bandía")
-    for name in private_names:
+    private_lore_markers = ("Example Founder", "Example Member", "Private Alias")
+    for name in private_lore_markers:
         assert name not in instructions
         assert name not in server_info
 

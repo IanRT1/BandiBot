@@ -42,7 +42,11 @@ from bot.utils import (
     get_current_pst_date,
     get_server_info,
 )
-from bot.tool_schemas import ALL_TOOLS, tools_without_context_lookups
+from bot.tool_schemas import (
+    ALL_TOOLS,
+    tools_without_context_lookups_or_web_search,
+    tools_without_web_search,
+)
 from bot.openai_client import send_to_openai
 from bot.tool_executor import execute_tool_call, is_music_tool
 from core.config import LOG_SENSITIVE_CONTENT, OPENAI_MODEL
@@ -105,7 +109,7 @@ def build_context_info(message, client):
         logger.debug("[rag] retrieved %d server-lore chunk(s) for text context", len(lore_chunks))
         context += "\n\n" + format_retrieved_context(lore_chunks)
 
-    return context, user_message, lore_is_confident
+    return context, user_message, lore_is_confident, bool(lore_chunks)
 
 
 def build_server_info_context(question: str = "") -> str:
@@ -193,7 +197,12 @@ async def handle_bot_mention(message, client):
 
         logger.debug("[chat] context prepared in %.0fms", prep_ms)
 
-        context_info, user_message, has_retrieved_lore = build_context_info(message, client)
+        (
+            context_info,
+            user_message,
+            has_retrieved_lore,
+            has_lore_context,
+        ) = build_context_info(message, client)
         instruction = build_instruction(
             client.user.display_name,
             message.guild.name,
@@ -236,9 +245,16 @@ async def handle_bot_mention(message, client):
         ])
 
         t_llm = time.perf_counter()
+        if has_retrieved_lore:
+            available_tools = tools_without_context_lookups_or_web_search()
+        elif has_lore_context:
+            available_tools = tools_without_web_search()
+        else:
+            available_tools = ALL_TOOLS
+
         response_data = await send_to_openai(
             {"messages": messages, "temperature": 0.5},
-            tools=tools_without_context_lookups() if has_retrieved_lore else ALL_TOOLS,
+            tools=available_tools,
         )
         llm_ms = (time.perf_counter() - t_llm) * 1000
 

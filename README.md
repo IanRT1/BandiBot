@@ -138,8 +138,7 @@ lists or private server names. Live Discord facts such as server creation date
 remain structured context.
 
 The retriever normalizes accents and tolerates conservative speech-to-text
-spelling variations such as
-`Poyo`/`pollo` and `Beyra`/`Beira`. If no lore matches, the full private file is
+spelling variations for names. If no lore matches, the full private file is
 not sent as a fallback; the bot reports that the fact is not documented instead
 of guessing.
 

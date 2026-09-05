@@ -151,8 +151,8 @@ def _terms_match(left: str, right: str) -> bool:
         return False
 
     # Accept at most one insertion, deletion, or substitution after folding
-    # repeated letters (e.g. pollo -> polo vs Poyo). This avoids broad fuzzy
-    # matching that could attach unrelated lore to a question.
+    # repeated letters. This avoids broad fuzzy matching that could attach
+    # unrelated lore to a question.
     if len(left) == len(right):
         return sum(a != b for a, b in zip(left, right)) <= 1
     shorter, longer = (left, right) if len(left) < len(right) else (right, left)

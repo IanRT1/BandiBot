@@ -7,7 +7,11 @@ from bot.retrieval import (
     retrieve_with_confidence,
     should_retrieve_lore,
 )
-from bot.tool_schemas import tools_without_context_lookups
+from bot.tool_schemas import (
+    tools_without_context_lookups,
+    tools_without_context_lookups_or_web_search,
+    tools_without_web_search,
+)
 
 
 def test_retrieval_returns_only_relevant_server_lore():
@@ -26,10 +30,10 @@ The annual tournament started in 2024.
 
 
 def test_casual_messages_skip_lore_retrieval():
-    document = "# Members\nPoyo is a member."
+    document = "# Members\nMemberAlpha is a member."
 
     assert should_retrieve_lore("Hello, bot!", document) is False
-    assert should_retrieve_lore("¿Quién es Poyo?", document) is True
+    assert should_retrieve_lore("¿Quién es MemberAlpha?", document) is True
 
 
 def test_retrieval_returns_no_context_for_unrelated_question():
@@ -55,27 +59,27 @@ def test_retrieval_matches_safe_singular_plural_variants():
 
 
 def test_retrieval_does_not_fuzzy_match_ordinary_sentence_words():
-    document = "# Notes\nBandía is the group in which Ian currently se encuentra."
+    document = "# Notes\nGroupAlpha is the group in which UserAlpha currently se encuentra."
 
     assert retrieve_relevant_chunks(document, "¿Cómo te encuentras?") == []
 
 
 def test_retrieval_handles_stt_spelling_variation_for_member_name():
-    document = "# Members\nPoyo pretende ser un DJ."
+    document = "# Members\nMira pretende ser un DJ."
 
-    chunks = retrieve_relevant_chunks(document, "¿Quién es el pollo?")
+    chunks = retrieve_relevant_chunks(document, "¿Quién es Mina?")
 
     assert len(chunks) == 1
-    assert "Poyo" in chunks[0]
+    assert "Mira" in chunks[0]
 
 
 def test_retrieval_handles_name_spelling_variation():
-    document = "# Members\nLa novia de Trabis se llama Beyra."
+    document = "# Members\nLa pareja de MemberAlpha se llama Lara."
 
-    chunks = retrieve_relevant_chunks(document, "¿Sabes quién es Beira?")
+    chunks = retrieve_relevant_chunks(document, "¿Sabes quién es Lira?")
 
     assert len(chunks) == 1
-    assert "Beyra" in chunks[0]
+    assert "Lara" in chunks[0]
 
 
 def test_retrieval_confidence_keeps_tools_for_weak_match():
@@ -189,9 +193,9 @@ def test_embeddings_are_precomputed_once_per_document(monkeypatch):
 
 
 def test_retrieval_confidence_is_strong_for_member_name_match():
-    document = "# Members\nLa novia de Trabis se llama Beyra."
+    document = "# Members\nLa pareja de MemberAlpha se llama Lara."
 
-    chunks, confident = retrieve_with_confidence(document, "¿Quién es Beira?")
+    chunks, confident = retrieve_with_confidence(document, "¿Quién es Lira?")
 
     assert chunks
     assert confident is True
@@ -204,6 +208,19 @@ def test_retrieved_context_explicitly_prevents_redundant_tool_call():
     assert "answer directly without calling get_server_info" in context
     assert "get_server_info" not in names
     assert "get_member_activity" not in names
+
+
+def test_server_lore_tool_sets_do_not_offer_web_search():
+    assert "web_search" not in {
+        tool["function"]["name"] for tool in tools_without_web_search()
+    }
+    assert "web_search" not in {
+        tool["function"]["name"]
+        for tool in tools_without_context_lookups_or_web_search()
+    }
+    assert "web_search" in {
+        tool["function"]["name"] for tool in tools_without_context_lookups()
+    }
 
 
 def test_text_context_includes_retrieved_lore_before_llm(monkeypatch):
@@ -232,9 +249,10 @@ def test_text_context_includes_retrieved_lore_before_llm(monkeypatch):
         user=SimpleNamespace(mention="<@123>", id=123, display_name="BandiBot")
     )
 
-    context, user_message, has_lore = handlers.build_context_info(message, client)
+    context, user_message, has_lore, has_lore_context = handlers.build_context_info(message, client)
 
     assert has_lore is True
+    assert has_lore_context is True
     assert "annual tournament started in 2024" in context
     assert user_message == "What happened during the annual tournament?"
 
