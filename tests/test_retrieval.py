@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
-from bot.retrieval import format_retrieved_context, retrieve_relevant_chunks
+from bot.retrieval import format_retrieved_context, retrieve_relevant_chunks, retrieve_with_confidence
 from bot.tool_schemas import tools_without_context_lookups
 
 
@@ -26,6 +26,31 @@ def test_retrieval_returns_no_context_for_unrelated_question():
     assert retrieve_relevant_chunks(document, "What is the weather today?") == []
 
 
+def test_retrieval_ignores_generic_current_information_words():
+    document = "# History\nThe server began in 2020 and has a recent event."
+
+    assert retrieve_relevant_chunks(document, "What is the weather today?") == []
+    assert retrieve_relevant_chunks(document, "What is the latest exchange rate?") == []
+
+
+def test_retrieval_matches_safe_singular_plural_variants():
+    document = "## Conceptos\nEsta sección explica un concepto importante del servidor."
+
+    chunks = retrieve_relevant_chunks(document, "¿Qué conceptos explica el servidor?")
+
+    assert chunks
+    assert chunks[0].startswith("## Conceptos")
+
+
+def test_retrieval_matches_generic_section_synonyms():
+    document = "## Miembros, alias y relaciones\nLos miembros tienen apodos."
+
+    chunks = retrieve_relevant_chunks(document, "¿Qué persona tiene este apodo?")
+
+    assert chunks
+    assert chunks[0].startswith("## Miembros")
+
+
 def test_retrieval_does_not_fuzzy_match_ordinary_sentence_words():
     document = "# Notes\nBandía is the group in which Ian currently se encuentra."
 
@@ -48,6 +73,125 @@ def test_retrieval_handles_name_spelling_variation():
 
     assert len(chunks) == 1
     assert "Beyra" in chunks[0]
+
+
+def test_retrieval_confidence_keeps_tools_for_weak_match():
+    document = "# History\nThe server began as a gaming community in 2020."
+
+    chunks, confident = retrieve_with_confidence(document, "community origin")
+
+    assert chunks
+    assert confident is False
+
+
+def test_semantic_retrieval_can_recover_a_paraphrase(monkeypatch):
+    import bot.retrieval as retrieval
+
+    class FakeEmbeddingModel:
+        def encode(self, texts, normalize_embeddings=True):
+            assert normalize_embeddings is True
+            vectors = []
+            for text in texts:
+                vectors.append(
+                    [1.0, 0.0]
+                    if "founding" in text or "origin" in text or "server began" in text
+                    else [0.0, 1.0]
+                )
+            return __import__("numpy").array(vectors, dtype=float)
+
+    monkeypatch.delenv("BANDIBOT_DISABLE_SEMANTIC_RAG", raising=False)
+    monkeypatch.setattr(retrieval, "_embedding_model", FakeEmbeddingModel())
+    monkeypatch.setattr(retrieval, "_embedding_model_failed", False)
+    retrieval._index_cache.clear()
+    retrieval._query_embedding_cache.clear()
+
+    document = "# History\nThe server began as a gaming community in 2020."
+    chunks = retrieve_relevant_chunks(document, "Tell me about the founding origin")
+
+    assert len(chunks) == 1
+    assert "server began" in chunks[0]
+
+
+def test_bm25_prefers_repeated_query_terms():
+    document = (
+        "# General\nThe server has many activities.\n\n"
+        "# Tournament\nThe annual tournament tournament schedule and tournament results."
+    )
+
+    chunks = retrieve_relevant_chunks(document, "tournament results")
+
+    assert chunks[0].startswith("# Tournament")
+
+
+def test_child_chunks_retain_parent_section_for_broad_questions():
+    document = (
+        "## History and events\n\n"
+        "### Server founding\nThe server began as a gaming community.\n\n"
+        "### First tournament\nThe first tournament happened in 2024."
+    )
+
+    chunks = retrieve_relevant_chunks(document, "What happened in the server history?")
+
+    assert chunks
+    assert any("[Section: History and events]" in chunk for chunk in chunks)
+
+
+def test_semantic_only_match_requires_a_clear_lead(monkeypatch):
+    import bot.retrieval as retrieval
+
+    class AmbiguousEmbeddingModel:
+        def encode(self, texts, normalize_embeddings=True):
+            assert normalize_embeddings is True
+            return __import__("numpy").array(
+                [[0.8, 0.6] for _ in texts], dtype=float
+            )
+
+    monkeypatch.delenv("BANDIBOT_DISABLE_SEMANTIC_RAG", raising=False)
+    monkeypatch.setattr(retrieval, "_embedding_model", AmbiguousEmbeddingModel())
+    monkeypatch.setattr(retrieval, "_embedding_model_failed", False)
+    retrieval._index_cache.clear()
+    retrieval._query_embedding_cache.clear()
+
+    document = "# History\nThe server began as a gaming community.\n\n# Members\nIan founded it."
+
+    assert retrieve_relevant_chunks(document, "Tell me about the weather") == []
+
+
+def test_embeddings_are_precomputed_once_per_document(monkeypatch):
+    import bot.retrieval as retrieval
+
+    class FakeEmbeddingModel:
+        def __init__(self):
+            self.calls = []
+
+        def encode(self, texts, normalize_embeddings=True):
+            self.calls.append(list(texts))
+            return __import__("numpy").array([[1.0, 0.0] for _ in texts], dtype=float)
+
+    model = FakeEmbeddingModel()
+    monkeypatch.delenv("BANDIBOT_DISABLE_SEMANTIC_RAG", raising=False)
+    monkeypatch.setattr(retrieval, "_embedding_model", model)
+    monkeypatch.setattr(retrieval, "_embedding_model_failed", False)
+    retrieval._index_cache.clear()
+    retrieval._query_embedding_cache.clear()
+
+    document = "# History\nThe server began in 2020.\n\n# Members\nIan founded it."
+    retrieve_relevant_chunks(document, "server origin")
+    retrieve_relevant_chunks(document, "who founded it")
+
+    assert len(model.calls) == 3
+    assert len(model.calls[0]) == 2  # chunks encoded once as the document index
+    assert len(model.calls[1]) == 1
+    assert len(model.calls[2]) == 1
+
+
+def test_retrieval_confidence_is_strong_for_member_name_match():
+    document = "# Members\nLa novia de Trabis se llama Beyra."
+
+    chunks, confident = retrieve_with_confidence(document, "¿Quién es Beira?")
+
+    assert chunks
+    assert confident is True
 
 
 def test_retrieved_context_explicitly_prevents_redundant_tool_call():

@@ -120,14 +120,25 @@ cleared so later music commands continue normally.
 
 **Private deployment context** — personal instructions and server lore are ignored by Git. Generic `.example.txt` templates are tracked and used automatically when the private files are absent.
 
-**Local RAG for server lore** — server-lore files are split into sections and searched locally before the LLM request. Relevant excerpts are added to the prompt, and the `get_server_info` tool is omitted for that request so the answer can be generated in one LLM call. Live Discord facts such as server creation date remain structured context.
+**Hybrid local RAG for server lore** — server-lore files are split into sections
+and searched locally before the LLM request. BM25/fuzzy matching protects
+server-specific names and speech-to-text corrections, while a cached
+multilingual embedding model recovers paraphrased questions. Document-chunk
+embeddings are precomputed and reused, so each query only embeds the question.
+The top three matches are ranked together and capped before being added to the
+prompt. Strong matches omit the redundant `get_server_info` tool so the answer
+uses one LLM call; weak matches keep the tool available as a fallback. The
+embedding model is loaded lazily and the system degrades to BM25 retrieval if
+it is unavailable. Parent section labels, conservative singular/plural and
+section-language matching, and low-information query filtering improve broad
+questions without hardcoding private server names. Live Discord facts such as
+server creation date remain structured context.
 
-The retriever is intentionally lightweight lexical RAG rather than a hosted or
-vector-embedding service. It normalizes accents, ignores conversational
-stopwords, and tolerates conservative speech-to-text spelling variations such
-as `Poyo`/`pollo` and `Beyra`/`Beira`. If no lore matches, the full private file
-is not sent as a fallback; the bot reports that the fact is not documented
-instead of guessing.
+The retriever normalizes accents, ignores conversational stopwords, and
+tolerates conservative speech-to-text spelling variations such as
+`Poyo`/`pollo` and `Beyra`/`Beira`. If no lore matches, the full private file is
+not sent as a fallback; the bot reports that the fact is not documented instead
+of guessing.
 
 **Shared tool execution** — text and voice commands use the same tool executor.
 Music intent rules distinguish skipping the currently playing song from deleting
@@ -338,7 +349,7 @@ BandiBot/
 ├── bot/
 │   ├── handlers.py         # Text command handling, LLM context, replies
 │   ├── google_search.py    # Gemini Google Search grounding adapter
-│   ├── retrieval.py        # Local RAG chunking and lexical retrieval
+│   ├── retrieval.py        # Local hybrid RAG chunking and retrieval
 │   ├── openai_client.py    # OpenAI SDK wrapper
 │   ├── tool_schemas.py     # OpenAI tool definitions
 │   ├── tool_executor.py    # Shared text/voice tool execution
@@ -394,7 +405,7 @@ The tests cover:
   partial provider stream
 - Private context separation and ignored test-cache directories
 
-The suite currently contains 26 tests. The only expected warning is Python's
+The suite currently contains 36 tests. The only expected warning is Python's
 `audioop` deprecation warning from the Discord dependency.
 
 GitHub Actions runs the same test suite and a Python compilation check on every

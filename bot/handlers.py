@@ -50,7 +50,7 @@ from bot.retrieval import (
     format_retrieved_context,
     load_context_file,
     load_server_lore,
-    retrieve_relevant_chunks,
+    retrieve_with_confidence,
 )
 
 from music.player import voice_manager
@@ -80,7 +80,7 @@ def build_context_info(message, client):
     total_members = message.guild.member_count
     current_pst_time = get_current_pst_time()
     current_pst_date = get_current_pst_date()
-    lore_chunks = retrieve_relevant_chunks(_SERVER_LORE, user_message)
+    lore_chunks, lore_is_confident = retrieve_with_confidence(_SERVER_LORE, user_message)
 
     context = dedent(
         f"""
@@ -101,13 +101,13 @@ def build_context_info(message, client):
         logger.debug("[rag] retrieved %d server-lore chunk(s) for text context", len(lore_chunks))
         context += "\n\n" + format_retrieved_context(lore_chunks)
 
-    return context, user_message, bool(lore_chunks)
+    return context, user_message, lore_is_confident
 
 
 def build_server_info_context(question: str = "") -> str:
     if not _SERVER_LORE:
         return "No server info available."
-    chunks = retrieve_relevant_chunks(_SERVER_LORE, question)
+    chunks, _ = retrieve_with_confidence(_SERVER_LORE, question)
     if not chunks:
         logger.debug("[rag] no matching lore for server-info lookup")
         return (

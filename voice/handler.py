@@ -36,7 +36,7 @@ import discord
 
 from bot.tool_schemas import ALL_TOOLS, tools_without_context_lookups
 from bot.handlers import build_instruction
-from bot.retrieval import format_retrieved_context, load_server_lore, retrieve_relevant_chunks
+from bot.retrieval import format_retrieved_context, load_server_lore, retrieve_with_confidence
 from bot.openai_client import send_to_openai
 from bot.tool_executor import execute_tool_call, is_music_tool
 from bot.utils import clean_username, get_current_pst_time, get_current_pst_date
@@ -155,11 +155,11 @@ def _build_voice_context(member: discord.Member, guild: discord.Guild, text: str
         f"- Interaction Mode: Voice\n"
         f"{vc_line}"
     )
-    lore_chunks = retrieve_relevant_chunks(load_server_lore(), text)
+    lore_chunks, lore_is_confident = retrieve_with_confidence(load_server_lore(), text)
     if lore_chunks:
         logger.debug("[rag] retrieved %d server-lore chunk(s) for voice context", len(lore_chunks))
         context += "\n\n" + format_retrieved_context(lore_chunks)
-    return context, bool(lore_chunks)
+    return context, lore_is_confident
 
 
 class _FakeMsgProxy:
