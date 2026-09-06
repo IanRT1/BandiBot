@@ -302,7 +302,7 @@ class NowPlayingView(discord.ui.View):
             pass
         self.message = None
         self.player.now_playing_message = None
-        logger.info("[now_playing] cleared now playing banner; queue empty")
+        logger.debug("[now_playing] cleared now playing banner; queue empty")
 
         try:
             msg = await channel.send(embed=_build_empty_embed())

@@ -399,7 +399,7 @@ class GuildPlayer:
     def _schedule_start_when_free(self):
         if self._start_when_free_task and not self._start_when_free_task.done():
             return
-        logger.info("[music] voice client busy with standalone audio; music will start when free")
+        logger.debug("[music] voice client busy with standalone audio; music will start when free")
         loop = self.voice_client.client.loop if self.voice_client else asyncio.get_event_loop()
         self._start_when_free_task = loop.create_task(self._start_when_free())
 
@@ -416,7 +416,7 @@ class GuildPlayer:
                 await asyncio.sleep(0.2)
 
             if self.queue and self.is_connected and self.current is None:
-                logger.info("[music] standalone audio finished; starting queued music")
+                logger.debug("[music] standalone audio finished; starting queued music")
                 self.play_next()
         except asyncio.CancelledError:
             pass

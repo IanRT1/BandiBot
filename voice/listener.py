@@ -583,7 +583,7 @@ class GuildVoiceSession:
         self._speech_interrupted_for: set[int] = set()
         self._protected_pipeline_tasks: set[asyncio.Task] = set()
 
-        logger.info(f"[voice] ready in {guild.name} | model: {self._oww_model_name}")
+        logger.debug(f"[voice] ready in {guild.name} | model: {self._oww_model_name}")
 
     def bump_activity(self):
         self._last_activity = time.time()
@@ -638,7 +638,7 @@ class GuildVoiceSession:
                 pipeline_task.cancel()
                 self._pipeline_task = None
         self._pipeline_is_music = False
-        logger.info("[voice] ← interrupted current pipeline")
+        logger.debug("[voice] ← interrupted current pipeline")
 
     def _stop_receiving(self):
         if not self._voice_client:
@@ -665,7 +665,12 @@ class GuildVoiceSession:
         self._last_activity = time.time()
         if not self._idle_task or self._idle_task.done():
             self._idle_task = asyncio.create_task(self._idle_loop())
-        logger.info(f"[voice] → listening for wake word in {voice_channel.name}")
+        logger.info(
+            "[voice] joined %s in %s; listening for wake word | model=%s",
+            voice_channel.name,
+            self.guild.name,
+            self._oww_model_name,
+        )
 
     async def _restart_sink(self):
         if not self._voice_client or not self._voice_client.is_connected():
