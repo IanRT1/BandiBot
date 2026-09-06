@@ -17,6 +17,30 @@ import pytest
 from voice import handler
 
 
+@pytest.mark.parametrize("text", ["Stop!", "stop", "¡Para!", "Detente."])
+@pytest.mark.parametrize("queued", [False, True])
+def test_bare_stop_controls_music_after_interrupted_acknowledgement(monkeypatch, text, queued):
+    from unittest.mock import AsyncMock
+    from music.player import voice_manager
+
+    player = SimpleNamespace(current=None if queued else object(),
+                             queue=[object()] if queued else [], text_channel=None)
+    monkeypatch.setattr(voice_manager, "get_player", lambda guild: player)
+    execute = AsyncMock(return_value="Stopped and cleared the queue.")
+    model = AsyncMock()
+    monkeypatch.setattr(handler, "execute_tool_call", execute)
+    monkeypatch.setattr(handler, "send_to_openai", model)
+    result = asyncio.run(handler.handle_voice_command(
+        text, SimpleNamespace(name="Ian", nick=None), object(), object(), [],
+        speech_was_interrupted=True,
+    ))
+    assert result == ("Stopped and cleared the queue.", False)
+    execute.assert_awaited_once()
+    assert execute.call_args.args[0] == {"name": "stop_music", "arguments": {}}
+    assert execute.call_args.args[1].content == text
+    model.assert_not_awaited()
+
+
 def test_song_acknowledgement_is_spoken_when_resolution_finishes_first(monkeypatch):
     from unittest.mock import AsyncMock
     from voice.listener import voice_listener_manager
@@ -92,7 +116,7 @@ def test_voice_model_receives_stop_context_and_live_search(monkeypatch):
 
     monkeypatch.setattr(handler, "send_to_openai", generate)
     assert asyncio.run(handler.handle_voice_command(
-        "Stop!", SimpleNamespace(name="Ian", nick=None), SimpleNamespace(name="server"),
+        "Stop speaking!", SimpleNamespace(name="Ian", nick=None), SimpleNamespace(name="server"),
         SimpleNamespace(user=SimpleNamespace(display_name="BandiBot")), [],
         speech_was_interrupted=True,
     )) == ("Stopped.", False)

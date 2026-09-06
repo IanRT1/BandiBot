@@ -485,11 +485,13 @@ The tests cover:
   partial provider stream
 - Runtime voice/music shutdown cleanup, listener lifecycle serialization, and
   failure isolation
+- Late resolution after stop/disconnect/recovery, cancellation of preloaded
+  tracks, expired stream refresh, and stopping paused or looping playback
 - Voice search acknowledgement overlap, English/Spanish routing, and
   cancellation behavior
 - Private context separation and ignored test-cache directories
 
-The suite currently contains 112 tests. The only expected warning is Python's
+The suite currently contains **139 tests**. The only expected warning is Python's
 `audioop` deprecation warning from the Discord dependency.
 
 For a local syntax check, compile the edited modules with:
@@ -498,9 +500,21 @@ For a local syntax check, compile the edited modules with:
 python -m py_compile core/client.py music/player.py voice/handler.py voice/listener.py
 ```
 
-CI also builds the wheel, installs it into a clean target directory, and
-verifies that packaged assets and example context files work without the source
-checkout.
+CI runs on Windows and Linux with Python 3.11. It also builds the wheel,
+installs it without dependencies into a fresh virtual environment, and checks
+packaged assets, example context files, and console-entry metadata from outside
+the checkout. This packaging check does not start the bot or validate live services.
+
+To run the same packaging check locally (with one wheel in `dist/`):
+
+```powershell
+python -m build --wheel --no-isolation
+python scripts/check_wheel.py
+```
+
+Restricted Windows execution environments may deny pytest access to temporary
+directories. Run the tests with normal filesystem permissions if setup fails
+with `WinError 5`; those setup errors do not indicate failed bot assertions.
 
 The test suite sets placeholder API keys and disables semantic embeddings, so
 it does not require production secrets, private context files, network access,

@@ -11,8 +11,15 @@ permissions:
 
 jobs:
   tests:
-    name: Python tests
-    runs-on: ubuntu-latest
+    name: Python tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
 
     steps:
       - name: Check out repository
@@ -49,35 +56,4 @@ jobs:
         run: python -m build --wheel --no-isolation
 
       - name: Install and validate wheel
-        env:
-          WHEEL_TARGET: ${{ runner.temp }}/bandibot-wheel
-        run: |
-          python -m pip install --no-deps --target "$WHEEL_TARGET" dist/*.whl
-          python - <<'PY'
-          import glob
-          import sys
-          import zipfile
-          from pathlib import Path
-
-          wheel_path = Path(glob.glob("dist/*.whl")[0])
-          with zipfile.ZipFile(wheel_path) as wheel:
-              names = set(wheel.namelist())
-
-          required = {
-              "assets/BandiBot.onnx",
-              "assets/wake_activation.wav",
-              "data/instructions.example.txt",
-              "data/server_info.example.txt",
-              "core/paths.py",
-          }
-          missing = required - names
-          assert not missing, f"missing wheel files: {sorted(missing)}"
-          assert not any(name.startswith(("tests/", "build/")) for name in names)
-
-          sys.path.insert(0, "${{ runner.temp }}/bandibot-wheel")
-          from core.paths import assets_root, packaged_data_root
-
-          assert (assets_root() / "BandiBot.onnx").is_file()
-          assert (packaged_data_root() / "instructions.example.txt").is_file()
-          print(f"validated {wheel_path.name}")
-          PY
+        run: python scripts/check_wheel.py

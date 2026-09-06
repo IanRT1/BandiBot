@@ -892,14 +892,11 @@ class GuildVoiceSession:
                     return
                 if not text or len(text.strip()) < 2:
                     logger.info("[voice] ✗ empty transcription — resetting")
-                    if self.sink:
-                        self.sink._reset_user(uid)
                     return
 
                 if self.sink and self.sink._get_user(uid).interrupted:
                     completion_status = "interrupted"
                     logger.debug("[voice] ✗ interrupted after STT — dropping response")
-                    self.sink._get_user(uid).reset()
                     return
 
                 log_message(logger, "voice", "user", clean_username(getattr(member, "nick", None), member.name), text)
@@ -926,7 +923,8 @@ class GuildVoiceSession:
                     )
                     return
                 elapsed = (time.perf_counter() - t) * 1000
-                self._pipeline_is_music = not bool(response_text)
+                if self._pipeline_task is current_task:
+                    self._pipeline_is_music = not bool(response_text)
 
                 was_interrupted = uid in self._interrupted_pipeline_uids
                 if was_interrupted:
@@ -935,9 +933,7 @@ class GuildVoiceSession:
                 if self.sink and (self.sink._get_user(uid).interrupted or was_interrupted):
                     completion_status = "interrupted"
                     logger.debug("[voice] ✗ interrupted after LLM — dropping TTS")
-                    self.sink._get_user(uid).reset()
-                    if response_text:
-                        return
+                    return
 
                 if response_text:
                     log_message(logger, "voice", "bot", self.client.user.display_name, response_text)
@@ -981,12 +977,16 @@ class GuildVoiceSession:
                 if current_task:
                     self._protected_pipeline_tasks.discard(current_task)
                 if self._pipeline_task is current_task:
+                    # A protected music request can finish after a repeated
+                    # wake word starts another capture. Only release processing
+                    # state still owned by this task; never reset that capture
+                    # or a newer pipeline's state.
+                    if self.sink:
+                        u = self.sink._get_user(uid)
+                        if u.state not in ("listening", "waiting"):
+                            self.sink._reset_user(uid)
                     self._pipeline_task = None
                     self._pipeline_is_music = False
-                if self.sink:
-                    u = self.sink._get_user(uid)
-                    if u.state not in ("listening", "waiting"):
-                        self.sink._reset_user(uid)
 
         self._pipeline_task = asyncio.create_task(_pipeline())
 

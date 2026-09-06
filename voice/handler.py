@@ -379,6 +379,18 @@ async def handle_voice_command(
     user_name = clean_username(getattr(member, 'nick', None), member.name)
     t_start = time.perf_counter()
 
+    from music.player import voice_manager
+    player = voice_manager.get_player(guild)
+    # The wake word already cancels speech. A standalone stop command with
+    # music present must reach playback control, even during an acknowledgement.
+    bare_stop = re.fullmatch(r"[\s¡¿]*(stop|para|detente)[\s.!¡¿?]*", text, re.IGNORECASE)
+    if bare_stop and (player.current or player.queue):
+        result = await execute_tool_call(
+            {"name": "stop_music", "arguments": {}},
+            _FakeMsgProxy(guild, member, text),
+        )
+        return result, False
+
     instruction = build_instruction(
         bot_display_name=client.user.display_name,
         server_name=guild.name,
@@ -423,9 +435,11 @@ async def handle_voice_command(
         f"Current playback state: speech was just interrupted by the wake word: {speech_was_interrupted}; "
         f"music track loaded: {bool(player.current)}; music paused: {bool(player.current and player.current.paused_at is not None)}; "
         f"upcoming tracks: {len(player.queue)}. "
-        "Use this state to interpret the CURRENT command. If speech was just interrupted, "
-        "an unqualified request to stop means stop speaking; speech is already stopped, "
-        "so acknowledge briefly without a music tool. Explicit requests to stop music or clear "
+        "Use this state to interpret the CURRENT command. An unqualified stop request "
+        "with active, paused, or queued music means stop music. If no music is present "
+        "and speech was just interrupted, speech is already stopped; acknowledge briefly "
+        "without a music tool. Explicit requests to stop speaking do not stop music. "
+        "Explicit requests to stop music or clear "
         "the queue still use the appropriate tool. Without interrupted speech, interpret a stop "
         "request using actual music state and conversation context; clarify if ambiguous."
     )})

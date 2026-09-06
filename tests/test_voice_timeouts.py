@@ -1,6 +1,51 @@
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+from unittest.mock import AsyncMock
+
+
+@pytest.mark.parametrize("new_state", ["waiting", "listening", "processing"])
+def test_old_music_completion_preserves_new_voice_command(monkeypatch, new_state):
+    import voice.handler as handler
+    import voice.stt as stt
+    import voice.tts as tts
+
+    _, session, user_state = _make_session(monkeypatch)
+
+    async def run():
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def command(**kwargs):
+            entered.set()
+            await release.wait()
+            return "", False
+
+        monkeypatch.setattr(stt, "transcribe", AsyncMock(return_value="Play Get Lucky"))
+        monkeypatch.setattr(handler, "handle_voice_command", command)
+        speak = AsyncMock()
+        monkeypatch.setattr(tts, "speak", speak)
+        await session.on_speech_captured(7, b"wav")
+        old_task = session._pipeline_task
+        await asyncio.wait_for(entered.wait(), 1)
+        session._interrupted_pipeline_uids.add(7)
+        user_state.state = new_state
+        replacement = None
+        if new_state == "processing":
+            replacement = asyncio.create_task(asyncio.Event().wait())
+            session._pipeline_task = replacement
+        release.set()
+        await asyncio.wait_for(old_task, 1)
+        assert user_state.state == new_state
+        assert user_state.reset_calls == 0
+        speak.assert_not_awaited()
+        if replacement:
+            assert session._pipeline_task is replacement
+            replacement.cancel()
+            await asyncio.gather(replacement, return_exceptions=True)
+
+    asyncio.run(run())
+
 
 class _FakeUserState:
     def __init__(self):

@@ -131,6 +131,7 @@ class GuildPlayer:
         self.guild = guild
         self.queue: deque[Track] = deque()
         self.current: Optional[Track] = None
+        self._playback_generation = 0
         self.voice_client: Optional[discord.VoiceClient] = None
         self._idle_task: Optional[asyncio.Task] = None
         self._resolver_task: Optional[asyncio.Task] = None
@@ -190,6 +191,7 @@ class GuildPlayer:
         await self._ensure_voice_listener(voice_channel)
 
     async def disconnect(self):
+        self._playback_generation += 1
         if self._idle_task:
             self._idle_task.cancel()
             self._idle_task = None
@@ -209,6 +211,7 @@ class GuildPlayer:
 
     async def prepare_for_voice_recovery(self):
         """Detach stale voice state while preserving playback for reconnection."""
+        self._playback_generation += 1
         current = self.current
         self.current = None
         self.voice_client = None
@@ -351,6 +354,12 @@ class GuildPlayer:
             logger.info(f"[music] waiting for resolution of {track.title!r}")
             loop = self.voice_client.client.loop
 
+            generation = self._playback_generation
+
+            def play_if_current():
+                if generation == self._playback_generation:
+                    self._play_resolved(track)
+
             async def _wait_and_play():
                 try:
                     # Refresh the signed stream URL directly; searching again
@@ -363,7 +372,7 @@ class GuildPlayer:
                 except Exception as e:
                     track.resolved = True
                     track.error = str(e)
-                loop.call_soon_threadsafe(lambda: self._play_resolved(track))
+                loop.call_soon_threadsafe(play_if_current)
 
             asyncio.run_coroutine_threadsafe(_wait_and_play(), loop)
             return
@@ -467,8 +476,11 @@ class GuildPlayer:
         mixer_source  = MixerSource(volume_source, clip_buffer=clip_buffer)
 
         loop = self.voice_client.client.loop
+        generation = self._playback_generation
 
         def _after(error):
+            if generation != self._playback_generation:
+                return
             finished_track = self.current
             elapsed = self.elapsed_seconds if finished_track else 0.0
             stderr_text = _read_ffmpeg_stderr(ffmpeg_source)
@@ -506,6 +518,8 @@ class GuildPlayer:
                             finished_track.error = str(exc)
                             logger.error(f"[music] retry refresh failed for {finished_track.title!r}: {exc}")
 
+                        if generation != self._playback_generation:
+                            return
                         if self.current is finished_track:
                             self.current = None
                             self.queue.appendleft(finished_track)
@@ -773,6 +787,10 @@ class VoiceManager:
         player = self.get_player(guild)
         if not player.is_connected:
             return "Bot is not in a voice channel."
+        player._playback_generation += 1
+        if player._start_when_free_task:
+            player._start_when_free_task.cancel()
+            player._start_when_free_task = None
         if player._now_playing_view:
             await player._now_playing_view.on_queue_empty()
             player._now_playing_view = None
@@ -781,8 +799,10 @@ class VoiceManager:
             player._resolver_task = None
         player._manual_stop = True
         player.queue.clear()
-        if player.is_playing:
+        if player.is_playing or player.voice_client.is_paused():
             player.voice_client.stop_playing()
+        player.current = None
+        player._schedule_idle_check()
         return "Stopped and cleared the queue."
 
     async def leave(self, guild) -> str:
