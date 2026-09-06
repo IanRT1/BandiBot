@@ -127,8 +127,24 @@ for handler in root_logger.handlers:
     if isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler):
         handler.setLevel(console_level)
 
+logger = logging.getLogger(__name__)
+from core.preflight import run_preflight
+from core.instance_lock import InstanceAlreadyRunning, SingleInstanceLock
+from core.session_logs import rotate_session_log
+from bot.retrieval import warm_retrieval
+
+instance_lock = SingleInstanceLock(
+    Path(__file__).resolve().parents[1] / "logs" / "bandibot.lock"
+)
+try:
+    instance_lock.acquire()
+except InstanceAlreadyRunning as exc:
+    logger.critical("[startup] %s", exc)
+    raise SystemExit(1)
+
 session_log_path = Path(__file__).resolve().parents[1] / "logs" / "session.log"
 session_log_path.parent.mkdir(parents=True, exist_ok=True)
+rotate_session_log(session_log_path)
 session_handler = logging.FileHandler(session_log_path, mode="w", encoding="utf-8")
 session_handler.setLevel(logging.DEBUG)
 session_handler.setFormatter(logging.Formatter(
@@ -137,13 +153,10 @@ session_handler.setFormatter(logging.Formatter(
 ))
 root_logger.addHandler(session_handler)
 
-logger = logging.getLogger(__name__)
 logger.info("[startup] initializing BandiBot")
-from core.preflight import run_preflight
-from bot.retrieval import warm_retrieval
-
 if not run_preflight(warmup=warm_retrieval).ok:
     logger.critical("[startup] preflight failed; bot not started")
+    instance_lock.release()
     raise SystemExit(1)
 
 logging.getLogger("torio").setLevel(logging.WARNING)
@@ -259,46 +272,49 @@ MAX_RETRIES = 10
 
 def main():
     retries = 0
-    logger.info("[startup] bot initialized; connecting to Discord")
-    while retries < MAX_RETRIES:
-        try:
-            if retries:
-                logger.info("[startup] retrying connection (attempt %d)", retries + 1)
-            client.run(DISCORD_TOKEN, log_handler=None)
-            logger.info("[startup] bot exited cleanly")
-            break
-        except KeyboardInterrupt:
-            logger.info("[startup] shutdown requested by user")
-            break
-        except discord.LoginFailure as e:
-            logger.critical("[startup] Discord authentication failed: %s", e)
-            break
-        except (
-            aiohttp.ClientConnectionError,
-            aiohttp.ClientPayloadError,
-            discord.GatewayNotFound,
-            discord.ConnectionClosed,
-        ) as e:
-            retries += 1
-            wait_time = min(60, (2 ** retries) + random.randint(0, 10))
-            logger.critical(
-                "[startup] network error: %s; retry %d/%d in %ds",
-                e, retries, MAX_RETRIES, wait_time,
-            )
-            time.sleep(wait_time)
-        except Exception as e:
-            retries += 1
-            if retries >= MAX_RETRIES:
-                logger.exception("[startup] unexpected error after %d attempts; exiting", retries)
+    try:
+        logger.info("[startup] bot initialized; connecting to Discord")
+        while retries < MAX_RETRIES:
+            try:
+                if retries:
+                    logger.info("[startup] retrying connection (attempt %d)", retries + 1)
+                client.run(DISCORD_TOKEN, log_handler=None)
+                logger.info("[startup] bot exited cleanly")
                 break
-            wait_time = min(60, 2 ** retries)
-            logger.exception(
-                "[startup] unexpected recoverable error; retry %d/%d in %ds",
-                retries, MAX_RETRIES, wait_time,
-            )
-            time.sleep(wait_time)
-    else:
-        logger.critical("[startup] exceeded %d retries; giving up", MAX_RETRIES)
+            except KeyboardInterrupt:
+                logger.info("[startup] shutdown requested by user")
+                break
+            except discord.LoginFailure as e:
+                logger.critical("[startup] Discord authentication failed: %s", e)
+                break
+            except (
+                aiohttp.ClientConnectionError,
+                aiohttp.ClientPayloadError,
+                discord.GatewayNotFound,
+                discord.ConnectionClosed,
+            ) as e:
+                retries += 1
+                wait_time = min(60, (2 ** retries) + random.randint(0, 10))
+                logger.critical(
+                    "[startup] network error: %s; retry %d/%d in %ds",
+                    e, retries, MAX_RETRIES, wait_time,
+                )
+                time.sleep(wait_time)
+            except Exception as e:
+                retries += 1
+                if retries >= MAX_RETRIES:
+                    logger.exception("[startup] unexpected error after %d attempts; exiting", retries)
+                    break
+                wait_time = min(60, 2 ** retries)
+                logger.exception(
+                    "[startup] unexpected recoverable error; retry %d/%d in %ds",
+                    retries, MAX_RETRIES, wait_time,
+                )
+                time.sleep(wait_time)
+        else:
+            logger.critical("[startup] exceeded %d retries; giving up", MAX_RETRIES)
+    finally:
+        instance_lock.release()
 
 
 if __name__ == "__main__":

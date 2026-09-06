@@ -134,6 +134,9 @@ MONITOR_INTERVAL      = 0.1
 
 SESSION_HISTORY_SIZE  = 10
 IDLE_TIMEOUT          = 600
+VOICE_WATCHDOG_INTERVAL = 5.0
+VOICE_DISCONNECT_GRACE = 15.0
+VOICE_RECOVERY_ATTEMPTS = 3
 
 CLIP_BUFFER_SECONDS = 30
 CLIP_FRAME_SECONDS = 0.02
@@ -571,6 +574,7 @@ class GuildVoiceSession:
         self._voice_client: Optional[voice_recv.VoiceRecvClient] = None
         self._last_activity: float = time.time()
         self._idle_task: Optional[asyncio.Task] = None
+        self._connection_watchdog_task: Optional[asyncio.Task] = None
         self._last_wake_word: float = 0.0
         self._pipeline_task: Optional[asyncio.Task] = None
         self._monitor_task: Optional[asyncio.Task] = None
@@ -685,6 +689,9 @@ class GuildVoiceSession:
             self._voice_client = await voice_channel.connect(cls=voice_recv.VoiceRecvClient)
         self.clip_buffer.start()
         await self._start_receiving(voice_channel)
+        self._connection_watchdog_task = asyncio.create_task(
+            self._connection_watchdog()
+        )
 
     async def stop(self):
         if self._idle_task:
@@ -693,16 +700,58 @@ class GuildVoiceSession:
         if self._monitor_task:
             self._monitor_task.cancel()
             self._monitor_task = None
+        if self._connection_watchdog_task:
+            self._connection_watchdog_task.cancel()
+            self._connection_watchdog_task = None
         if self._pipeline_task:
             self._pipeline_task.cancel()
             self._pipeline_task = None
         self.clip_buffer.stop()
-        if self._voice_client and self._voice_client.is_connected():
+        if self._voice_client:
             self._stop_receiving()
-            await self._voice_client.disconnect()
+            try:
+                await self._voice_client.disconnect(force=True)
+            except TypeError:
+                await self._voice_client.disconnect()
+            except Exception as exc:
+                logger.warning("[voice] stale voice disconnect failed: %s", exc)
         self._voice_client = None
         self.sink = None
         logger.info(f"[voice] disconnected from {self.guild.name}")
+
+    async def _connection_watchdog(self):
+        """Replace a voice client that remains disconnected after grace time."""
+        disconnected_at = None
+        try:
+            while True:
+                await asyncio.sleep(VOICE_WATCHDOG_INTERVAL)
+                voice_client = self._voice_client
+                if voice_client is None:
+                    return
+                if voice_client.is_connected():
+                    disconnected_at = None
+                    continue
+
+                now = time.monotonic()
+                if disconnected_at is None:
+                    disconnected_at = now
+                    logger.warning(
+                        "[voice] voice connection lost in %s; waiting %.0fs before recovery",
+                        self.guild.name,
+                        VOICE_DISCONNECT_GRACE,
+                    )
+                    continue
+                if now - disconnected_at < VOICE_DISCONNECT_GRACE:
+                    continue
+
+                logger.error(
+                    "[voice] voice connection stayed disconnected in %s; starting recovery",
+                    self.guild.name,
+                )
+                asyncio.create_task(voice_listener_manager.recover(self.guild, self))
+                return
+        except asyncio.CancelledError:
+            pass
 
     async def _idle_loop(self):
         from music.player import voice_manager
@@ -989,6 +1038,60 @@ class VoiceListenerManager:
             session = self._sessions.pop(guild.id, None)
             if session:
                 await session.stop()
+
+    async def recover(self, guild, failed_session: GuildVoiceSession):
+        """Replace a voice session after a sustained connection failure."""
+        async with self._lifecycle_lock:
+            if self._sessions.get(guild.id) is not failed_session:
+                return
+
+            voice_channel = getattr(failed_session._voice_client, "channel", None)
+            if voice_channel is None:
+                bot_member = getattr(guild, "me", None)
+                voice_state = getattr(bot_member, "voice", None)
+                voice_channel = getattr(voice_state, "channel", None)
+            if voice_channel is None:
+                logger.error("[voice] recovery aborted in %s: channel unavailable", guild.name)
+                self._sessions.pop(guild.id, None)
+                await failed_session.stop()
+                return
+
+            self._sessions.pop(guild.id, None)
+            await failed_session.stop()
+
+            for attempt in range(1, VOICE_RECOVERY_ATTEMPTS + 1):
+                session = None
+                try:
+                    logger.warning(
+                        "[voice] reconnecting to %s (attempt %d/%d)",
+                        guild.name,
+                        attempt,
+                        VOICE_RECOVERY_ATTEMPTS,
+                    )
+                    session = GuildVoiceSession(
+                        guild, failed_session.client, failed_session.loop
+                    )
+                    self._sessions[guild.id] = session
+                    await session.start(voice_channel)
+                    logger.info("[voice] voice recovery succeeded in %s", guild.name)
+                    return
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.error(
+                        "[voice] voice recovery attempt %d failed in %s: %s",
+                        attempt,
+                        guild.name,
+                        exc,
+                    )
+                    if self._sessions.get(guild.id) is session:
+                        self._sessions.pop(guild.id, None)
+                    if session:
+                        await session.stop()
+                    if attempt < VOICE_RECOVERY_ATTEMPTS:
+                        await asyncio.sleep(min(30, 2 ** attempt))
+
+            logger.error("[voice] voice recovery exhausted in %s", guild.name)
 
     async def shutdown(self):
         """Stop all active voice listener sessions during process shutdown."""

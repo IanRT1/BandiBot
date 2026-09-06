@@ -43,6 +43,7 @@ Every instance is independently hosted by the user. There is no central server, 
 - **Minimal voice acknowledgements** — song requests use a short English or Spanish playing/queued confirmation instead of narrating the search process
 - **Timeout recovery** — STT, voice-command, and TTS stages have independent timeouts and reset processing state when a provider hangs
 - **Clean voice lifecycle** — failed or timed-out commands release their pipeline state so later wake-word requests are not permanently blocked; listener start/stop operations are serialized to prevent duplicate voice sessions
+- **Voice disconnect recovery** — a sustained voice disconnect gets a 15-second grace period, then the stale client is replaced with up to three bounded reconnect attempts
 
 ### Music
 - **YouTube playback** via yt-dlp and FFmpeg with loudness normalization
@@ -67,7 +68,7 @@ Every instance is independently hosted by the user. There is no central server, 
 
 ### Reliability and Privacy
 - **Structured runtime logs** with separate startup, chat, voice, STT, TTS, tool, and RAG events
-- **Per-session diagnostics** — `logs/session.log` is overwritten on startup and always captures `DEBUG` detail locally
+- **Two-session diagnostics** — `logs/session.log` captures the current run and `logs/session.previous.log` preserves the immediately preceding run; both always capture `DEBUG` detail locally
 - **Selective tool routing** — obvious music, voice, web, member-activity, lore, and casual requests receive only the smallest safe tool set; ambiguous requests retain the full fallback set
 - **Transparent chat logs** — message and response previews are shown by default; set `LOG_SENSITIVE_CONTENT=0` to hide conversation contents
 - **Quiet local embeddings** — casual or very short messages without a lore/name signal skip semantic retrieval, and Sentence Transformers progress output is disabled
@@ -75,6 +76,7 @@ Every instance is independently hosted by the user. There is no central server, 
 - **Graceful shutdown and recovery** — active voice/music sessions are cleaned up on exit; transient connection failures retry with bounded backoff, while invalid credentials stop immediately
 - **Connection-aware logging** — bursts of Discord voice crypto/decryption packet errors produce one aggregated warning instead of flooding the log
 - **Quiet startup logging** — normal connection attempts are implicit; retry attempts are logged only after a connection failure
+- **Single-instance guard** — a process lock prevents multiple BandiBot instances from sharing one Discord token and invalidating each other's voice sessions
 - **Private deployment context** — personal instructions and server lore stay local and are excluded from Git
 - **Generic tracked templates** — new deployments can use safe `*.example.txt` files without exposing server-specific information
 - **Offline automated tests** for RAG, music intent routing, voice timeout recovery, TTS fallback, tool errors, voice lifecycle cleanup, acknowledgement language, and repository hygiene
@@ -159,6 +161,11 @@ an upcoming queue item, including Spanish phrasing such as `quitar la canción`.
 **Voice receive recovery** — bursts of Discord crypto/decryption failures are
 grouped into one warning and trigger a receive-sink restart, while unrelated
 voice processing errors remain visible individually.
+
+**Voice connection recovery** — the listener watchdog waits through short-lived
+Discord reconnects, then force-closes a stale voice client and retries a fresh
+connection with bounded exponential backoff. This is separate from the main
+Discord gateway retry loop.
 
 **Structured music outcomes** — `music/results.py` represents play success,
 queueing, startup, and failure as structured data. Text and voice confirmations
@@ -357,7 +364,9 @@ BandiBot/
 ├── core/
 │   ├── client.py           # Discord client, event routing, reconnection logic
 │   ├── config.py           # Centralized environment variable loading
+│   ├── instance_lock.py     # Single-process runtime guard
 │   ├── interaction_logging.py # Interaction timing, privacy, and usage logs
+│   ├── session_logs.py       # Two-file session log rotation
 │   └── preflight.py         # Startup dependency and asset validation
 │
 ├── voice/
@@ -401,9 +410,11 @@ BandiBot/
 │   ├── test_music_tools.py         # Music intent and tool safety tests
 │   ├── test_music_player.py        # Playback race and queue restoration tests
 │   ├── test_interaction_logging.py # Privacy and usage logging tests
+│   ├── test_instance_lock.py         # Single-process guard tests
 │   ├── test_preflight.py            # Startup validation tests
 │   ├── test_runtime_shutdown.py     # Voice/music cleanup tests
 │   ├── test_search_acknowledgement.py # Voice search/playing acknowledgements
+│   ├── test_session_logs.py          # Current/previous log rotation tests
 │   ├── test_tts.py                 # TTS providers, conversion, and fallback
 │   ├── test_voice_timeouts.py      # STT/LLM timeout state recovery
 │   └── test_repository_hygiene.py  # Private files and cache ignore rules
@@ -446,7 +457,7 @@ The tests cover:
   cancellation behavior
 - Private context separation and ignored test-cache directories
 
-The suite currently contains 101 tests. The only expected warning is Python's
+The suite currently contains 106 tests. The only expected warning is Python's
 `audioop` deprecation warning from the Discord dependency.
 
 For a local syntax check, compile the edited modules with:

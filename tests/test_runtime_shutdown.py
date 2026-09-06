@@ -4,6 +4,7 @@ import asyncio
 from types import SimpleNamespace
 
 from music.player import VoiceManager
+import voice.listener as listener
 from voice.listener import VoiceListenerManager
 
 
@@ -84,3 +85,37 @@ def test_voice_shutdown_continues_after_one_session_fails():
 
     assert stopped == [True]
     assert manager._sessions == {}
+
+
+def test_voice_recovery_replaces_the_failed_session(monkeypatch):
+    manager = VoiceListenerManager()
+    channel = SimpleNamespace(name="voice")
+    guild = SimpleNamespace(id=1, name="guild")
+    events = []
+
+    class FailedSession:
+        client = SimpleNamespace()
+        loop = None
+        _voice_client = SimpleNamespace(channel=channel)
+
+        async def stop(self):
+            events.append("stopped")
+
+    class RecoveredSession:
+        def __init__(self, guild, client, loop):
+            events.append(("created", guild.name, channel.name))
+
+        async def start(self, voice_channel):
+            events.append(("started", voice_channel.name))
+
+        async def stop(self):
+            pass
+
+    failed = FailedSession()
+    manager._sessions[guild.id] = failed
+    monkeypatch.setattr(listener, "GuildVoiceSession", RecoveredSession)
+
+    asyncio.run(manager.recover(guild, failed))
+
+    assert events == ["stopped", ("created", "guild", "voice"), ("started", "voice")]
+    assert isinstance(manager._sessions[guild.id], RecoveredSession)
