@@ -153,3 +153,26 @@ def test_failed_discord_play_restores_track_and_clears_current(monkeypatch):
     assert player.current is None
     assert list(player.queue) == [track]
     assert scheduled == [True]
+
+
+def test_voice_recovery_preserves_current_track_before_rebinding():
+    player = GuildPlayer(SimpleNamespace(name="Test Guild"))
+    current = _track("Current track")
+    upcoming = _track("Upcoming track")
+    player.current = current
+    player.queue = deque([upcoming])
+    player.voice_client = SimpleNamespace()
+    played = []
+    player.play_next = lambda: played.append(True)
+
+    async def run():
+        await player.prepare_for_voice_recovery()
+        replacement = SimpleNamespace()
+        player.restore_after_voice_recovery(replacement)
+
+    asyncio.run(run())
+
+    assert player.voice_client is not None
+    assert list(player.queue) == [current, upcoming]
+    assert player.current is None
+    assert played == [True]

@@ -25,11 +25,21 @@ import json
 import logging
 from core.config import OPENAI_API_KEY, OPENAI_MODEL
 from core.interaction_logging import record_token_usage
-from openai import AsyncOpenAI, APIError, APIConnectionError, RateLimitError
+from openai import (
+    APITimeoutError,
+    AsyncOpenAI,
+    APIError,
+    APIConnectionError,
+    RateLimitError,
+)
 
 logger = logging.getLogger(__name__)  
 
-_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+_client = AsyncOpenAI(
+    api_key=OPENAI_API_KEY,
+    timeout=45.0,
+    max_retries=0,
+)
 
 DEFAULT_MODEL = OPENAI_MODEL
 
@@ -101,6 +111,9 @@ async def send_to_openai(payload, tools=None):
             "usage": usage,
         }
 
+    except APITimeoutError as e:
+        logger.error(f"OpenAI request timed out: {e}")
+        return None
     except RateLimitError as e:
         logger.error(f"OpenAI rate limit hit: {e}")
         return None

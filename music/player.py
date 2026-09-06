@@ -207,6 +207,29 @@ class GuildPlayer:
         self.queue.clear()
         self.now_playing_message = None
 
+    async def prepare_for_voice_recovery(self):
+        """Detach stale voice state while preserving playback for reconnection."""
+        current = self.current
+        self.current = None
+        self.voice_client = None
+
+        if self._resolver_task:
+            self._resolver_task.cancel()
+            self._resolver_task = None
+        if self._start_when_free_task:
+            self._start_when_free_task.cancel()
+            self._start_when_free_task = None
+
+        if current and not any(track is current for track in self.queue):
+            self.queue.appendleft(current)
+        await self._clear_now_playing_messages()
+
+    def restore_after_voice_recovery(self, voice_client):
+        """Bind the replacement voice client and resume the queue."""
+        self.voice_client = voice_client
+        if self.queue:
+            self.play_next()
+
     async def _clear_now_playing_messages(self):
         """Delete playback UI when the player leaves voice or is torn down."""
         view = self._now_playing_view

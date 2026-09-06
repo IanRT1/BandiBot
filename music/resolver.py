@@ -15,9 +15,11 @@ Resolution modes:
 
 Search ranking:
   Text queries request the top seven YouTube results, then prefer title word
-  overlap and canonical studio signals such as Official Audio and Artist - Topic
-  uploads. Live/remix/cover/slowed/etc. results are penalized unless the user
-  explicitly asked for that variant.
+  overlap and canonical studio signals such as Official Audio, Artist - Topic,
+  and remaster uploads. Unrequested music videos are penalized because they can
+  include intros, outros, or visual-only content; video results are favored when
+  the user explicitly asks for a video. Live/remix/cover/slowed/etc. results are
+  penalized unless the user explicitly asked for that variant.
 
 Playlist behavior:
   Playlist entries are intentionally not fully resolved here. They enter the
@@ -630,16 +632,17 @@ def _score_result(entry: dict, query_lower: str) -> int:
     elif "audio" in title:
         score += 3 if uploader_overlap else 1
 
+    requested_video = _contains_phrase(query_lower, "video")
     if (
         "official video" in title
         or "official music video" in title
         or "video oficial" in title
     ):
-        score += 3
-    if "video" in title and not _contains_phrase(query_lower, "video"):
-        score -= 3
+        score += 3 if requested_video else -8
+    elif "video" in title and not requested_video:
+        score -= 6
     if "remaster" in title or "remastered" in title:
-        score += 2
+        score += 4
 
     if uploader.endswith(" - topic"):
         score += 8

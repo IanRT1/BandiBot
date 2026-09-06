@@ -43,14 +43,14 @@ Every instance is independently hosted by the user. There is no central server, 
 - **Minimal voice acknowledgements** — song requests use a short English or Spanish playing/queued confirmation instead of narrating the search process
 - **Timeout recovery** — STT, voice-command, and TTS stages have independent timeouts and reset processing state when a provider hangs
 - **Clean voice lifecycle** — failed or timed-out commands release their pipeline state so later wake-word requests are not permanently blocked; listener start/stop operations are serialized to prevent duplicate voice sessions
-- **Voice disconnect recovery** — a sustained voice disconnect gets a 15-second grace period, then the stale client is replaced with up to three bounded reconnect attempts
+- **Voice disconnect recovery** — a sustained voice disconnect gets a 15-second grace period, then the stale client is replaced with up to three bounded reconnect attempts while preserving the active track and queue
 
 ### Music
 - **YouTube playback** via yt-dlp and FFmpeg with loudness normalization
 - **Queue management** — add, remove, move, skip, pause, resume, and stop through natural language, with loop and shuffle available from the Now Playing controls
 - **Audio attachments** — attached audio files can be queued directly, with metadata and embedded cover art extracted when available
 - **Voice clips** — save the last 30 seconds of voice-channel audio as an MP3 clip
-- **Single song queuing** — resolved on the spot before playing
+- **Single song queuing** — resolved on the spot before playing, with unrequested music videos penalized in favor of audio, studio, and remaster results
 - **Bulk song queuing** — multiple songs or YouTube playlist URLs queued instantly as placeholders, resolved one track ahead in the background as songs play
 - **Graceful error handling** — unresolvable tracks are skipped with a notification at playback time
 - **Playback race recovery** — tracks that finish resolving while activation/TTS audio is playing wait safely instead of causing Discord's `Already playing audio` error; failed starts restore the track to the queue
@@ -164,7 +164,9 @@ voice processing errors remain visible individually.
 
 **Voice connection recovery** — the listener watchdog waits through short-lived
 Discord reconnects, then force-closes a stale voice client and retries a fresh
-connection with bounded exponential backoff. This is separate from the main
+connection with bounded exponential backoff. The music player detaches from the
+stale client, restores the interrupted track to the front of the queue, and
+resumes playback on the replacement client. This is separate from the main
 Discord gateway retry loop.
 
 **Structured music outcomes** — `music/results.py` represents play success,
@@ -457,7 +459,7 @@ The tests cover:
   cancellation behavior
 - Private context separation and ignored test-cache directories
 
-The suite currently contains 106 tests. The only expected warning is Python's
+The suite currently contains 110 tests. The only expected warning is Python's
 `audioop` deprecation warning from the Discord dependency.
 
 For a local syntax check, compile the edited modules with:

@@ -9,6 +9,7 @@ youtube_cookies.txt
 # Keep deployment-specific prompts and server lore out of version control.
 data/instructions.txt
 data/server_info.txt
+data/production_readiness.local.md
 
 # --- NODE ---
 

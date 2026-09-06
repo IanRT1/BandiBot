@@ -104,6 +104,7 @@ def test_voice_recovery_replaces_the_failed_session(monkeypatch):
     class RecoveredSession:
         def __init__(self, guild, client, loop):
             events.append(("created", guild.name, channel.name))
+            self._voice_client = SimpleNamespace()
 
         async def start(self, voice_channel):
             events.append(("started", voice_channel.name))

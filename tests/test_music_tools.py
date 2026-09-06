@@ -18,6 +18,60 @@ def _message(content):
     return SimpleNamespace(content=content, guild=object(), channel=None)
 
 
+def test_resolver_prefers_studio_or_remaster_over_unrequested_video():
+    from music.resolver import _score_result
+
+    query = "this must be the place talking heads"
+    video = {
+        "title": "Talking Heads - This Must Be the Place (Official Video)",
+        "uploader": "Talking Heads",
+        "duration": 250,
+    }
+    remaster = {
+        "title": "This Must Be the Place (Naive Melody) [2003 Remaster]",
+        "uploader": "Talking Heads",
+        "duration": 250,
+    }
+
+    assert _score_result(remaster, query) > _score_result(video, query)
+
+
+def test_explicit_video_request_does_not_penalize_official_video():
+    from music.resolver import _score_result
+
+    video = {
+        "title": "Talking Heads - This Must Be the Place (Official Video)",
+        "uploader": "Talking Heads",
+        "duration": 250,
+    }
+
+    assert _score_result(video, "this must be the place talking heads video") > _score_result(
+        video, "this must be the place talking heads"
+    )
+
+
+def test_resolver_penalizes_live_unless_requested():
+    from music.resolver import _score_result
+
+    live = {
+        "title": "This Must Be the Place (Live)",
+        "uploader": "Talking Heads",
+        "duration": 250,
+    }
+    studio = {
+        "title": "This Must Be the Place (Naive Melody) [2003 Remaster]",
+        "uploader": "Talking Heads",
+        "duration": 250,
+    }
+
+    assert _score_result(studio, "this must be the place talking heads") > _score_result(
+        live, "this must be the place talking heads"
+    )
+    assert _score_result(live, "this must be the place talking heads live") > _score_result(
+        live, "this must be the place talking heads"
+    )
+
+
 def test_remove_current_song_routes_to_skip(monkeypatch):
     import bot.tool_executor as executor
 
@@ -101,4 +155,3 @@ def test_tool_exception_is_returned_without_escaping(monkeypatch):
     )
 
     assert result == "Tool error: simulated failure"
-

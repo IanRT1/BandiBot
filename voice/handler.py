@@ -113,7 +113,8 @@ async def _song_confirmation(text: str, details: str, *, searching: bool) -> str
     instruction = (
         f"Respond in {language}. Say you are playing the requested song. Use the natural "
         "equivalent of 'playing' in that language, and mention the song and artist "
-        "only once when supplied. Do not say you are searching, checking, or using search details. "
+        "only once when supplied. "
+        "Do not say you are searching, checking, or using search details. "
         "Do not use Portuguese or another language. Keep it minimal: one short sentence."
         if searching else
         "Report the actual tool outcome. For a queued song, name the resolved song and artist "

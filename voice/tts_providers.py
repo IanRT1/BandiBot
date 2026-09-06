@@ -34,6 +34,7 @@ KOKORO_LANG = "e"
 KOKORO_SPEED = 1.1
 KOKORO_CHUNK_SIZE = 4096
 ELEVENLABS_PCM_RATE = 24000
+TTS_HTTP_TIMEOUT = aiohttp.ClientTimeout(total=60, connect=10, sock_read=15)
 
 
 class TTSProviderError(RuntimeError):
@@ -57,7 +58,7 @@ class DeepgramProvider:
             f"&sample_rate={TTS_SAMPLE_RATE}&container=none&speed={DEEPGRAM_SPEED}"
         )
         headers = {"Authorization": f"Token {DEEPGRAM_API_KEY}", "Content-Type": "application/json"}
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(timeout=TTS_HTTP_TIMEOUT) as session:
             async with session.post(url, headers=headers, json={"text": text}) as resp:
                 if resp.status != 200:
                     try:
@@ -112,7 +113,7 @@ class ElevenLabsProvider:
         )
         headers = {"xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json"}
         payload = {"text": text, "model_id": ELEVENLABS_MODEL}
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(timeout=TTS_HTTP_TIMEOUT) as session:
             async with session.post(url, headers=headers, json=payload) as resp:
                 if resp.status != 200:
                     try:

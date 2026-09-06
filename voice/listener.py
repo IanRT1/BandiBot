@@ -1045,6 +1045,11 @@ class VoiceListenerManager:
             if self._sessions.get(guild.id) is not failed_session:
                 return
 
+            from music.player import voice_manager
+
+            player = voice_manager.get_player(guild)
+            await player.prepare_for_voice_recovery()
+
             voice_channel = getattr(failed_session._voice_client, "channel", None)
             if voice_channel is None:
                 bot_member = getattr(guild, "me", None)
@@ -1073,6 +1078,7 @@ class VoiceListenerManager:
                     )
                     self._sessions[guild.id] = session
                     await session.start(voice_channel)
+                    player.restore_after_voice_recovery(session._voice_client)
                     logger.info("[voice] voice recovery succeeded in %s", guild.name)
                     return
                 except asyncio.CancelledError:
