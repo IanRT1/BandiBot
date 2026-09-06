@@ -7,6 +7,7 @@ youtube_cookies.txt
 
 # --- PRIVATE BOT CONTEXT ---
 # Keep deployment-specific prompts and server lore out of version control.
+AGENTS.md
 data/instructions.txt
 data/server_info.txt
 data/production_readiness.local.md
