@@ -24,7 +24,11 @@
 
 BandiBot is a fully self-hosted Discord bot designed for friend group servers. It listens continuously in voice channels for a custom wake word, transcribes commands via Deepgram, reasons through them with an OpenAI LLM, and responds via the configured text-to-speech provider — all while music plays uninterrupted in the background.
 
-Every instance is independently hosted by the user. There is no central server, no shared infrastructure, and no data leaving your machine except to the APIs you configure (Discord, OpenAI, Deepgram, Gemini, and optionally ElevenLabs).
+Every instance is independently hosted by the user. There is no central BandiBot
+service or shared application infrastructure. Runtime network traffic goes only
+to the services the bot uses: Discord, OpenAI, Deepgram, YouTube/yt-dlp,
+optional Gemini and ElevenLabs APIs, and model or challenge-component hosts when
+an uncached runtime asset must be downloaded.
 
 ---
 
@@ -53,9 +57,9 @@ Every instance is independently hosted by the user. There is no central server, 
 - **Single song queuing** — resolved on the spot before playing, with unrequested music videos penalized in favor of audio, studio, and remaster results
 - **Bulk song queuing** — multiple songs or YouTube playlist URLs queued instantly as placeholders, resolved one track ahead in the background as songs play
 - **Graceful error handling** — unresolvable tracks are skipped with a notification at playback time
-- **Playback race recovery** — tracks that finish resolving while activation/TTS audio is playing wait safely instead of causing Discord's `Already playing audio` error; failed starts restore the track to the queue
+- **Playback race recovery** — tracks that finish resolving while activation/TTS audio is playing wait safely instead of causing Discord's `Already playing audio` error; failed starts restore the track to the queue, while stop commands invalidate pending searches and stale Now Playing posts
 - **Stream URL refresh** — stale signed YouTube stream URLs are refreshed from the existing video URL before playback, avoiding a second search/ranking pass; playback failures can still search for an alternative result
-- **Now Playing embed** with live timer, album art banner, next track preview, and interactive button controls (previous, play/pause, skip, stop, queue, loop, shuffle, copy link)
+- **Now Playing embed** with live timer, album art banner, next track preview, and interactive button controls (restart, play/pause, skip, stop, queue, loop, shuffle, copy link)
 
 ### Text Commands
 - Full conversational LLM responses via @mention
@@ -117,7 +121,7 @@ Discord Gateway
 
 **Placeholder queue with one-ahead resolution** — bulk queued songs appear instantly in the queue. The background resolver pre-loads only the next track while the current one plays, then triggers the next resolution when the song changes. Respectful of YouTube's API and accurate to actual queue state.
 
-**Interruption system across async and audio threads** — wake word detection runs on the audio thread. When it fires mid-TTS, `cancel_tts()` immediately clears the TTS buffer, and `_interrupt_current()` cancels the asyncio pipeline task. Music commands are exempt from cancellation and always run to completion.
+**Interruption system across async and audio threads** — wake word detection runs on the audio thread. When it fires mid-TTS, `cancel_tts()` immediately clears the TTS buffer, and `_interrupt_current()` cancels the asyncio pipeline task. Music tool execution is protected from incidental wake-word interruption so queue state remains consistent; an explicit stop command can still invalidate an in-progress song search before it queues or plays.
 
 **Per-user state machines** — each user in the voice channel has independent wake word detection, VAD state, and capture buffers. Packet loss or bad audio from one user does not affect others.
 
@@ -180,6 +184,7 @@ therefore use the actual playback result instead of parsing display strings.
 ### System
 - Python 3.11+
 - FFmpeg installed and available in `PATH`
+- Node.js installed and available in `PATH` for YouTube challenge solving
 - espeak-ng installed and available in `PATH` when using the default Kokoro TTS provider
 
 ### Python Dependencies
@@ -203,7 +208,7 @@ from a requirements manifest.
 - [Discord Developer Portal](https://discord.com/developers/applications) — Bot token
 - [OpenAI Platform](https://platform.openai.com/) — API key
 - [Deepgram Console](https://console.deepgram.com/) — API key used for STT and optional Deepgram TTS
-- [Google AI Studio](https://aistudio.google.com/app/apikey) — API key for Google Search grounding
+- [Google AI Studio](https://aistudio.google.com/app/apikey) — optional API key for Google Search grounding
 - [ElevenLabs](https://elevenlabs.io/app/settings/api-keys) — optional API key for ElevenLabs TTS
 
 ### FFmpeg
@@ -262,7 +267,7 @@ For development, use an editable install instead:
 pip install -e ".[test]"
 ```
 
-**4. Create your `.env` file**
+**3. Create your `.env` file**
 
 ```bash
 cp .env.example .env
@@ -270,7 +275,7 @@ cp .env.example .env
 
 Edit `.env` with your API keys (see [Configuration](#configuration)).
 
-**5. Create a Discord bot**
+**4. Create a Discord bot**
 
 - Go to the [Discord Developer Portal](https://discord.com/developers/applications)
 - Create a new application and add a Bot
@@ -281,11 +286,7 @@ Edit `.env` with your API keys (see [Configuration](#configuration)).
 - Copy the bot token into your `.env`
 - Invite the bot to your server with the `bot` scope and the permissions needed for message reading, voice connect/speak, embeds, attachments, and message management. `Administrator` is the simplest private-server setup, but not strictly required.
 
-**6. Place your wake word model**
-
-Put your `BandiBot.onnx` wake word model file in the `assets/` directory. See [Wake Word Setup](#wake-word-setup) for how to train one.
-
-**7. Run the bot**
+**5. Run the bot**
 
 ```bash
 bandibot
@@ -294,6 +295,10 @@ bandibot
 The `bandibot` console command is provided by the package install.
 Stop any older BandiBot process before restarting so two Discord voice sessions
 cannot compete for the same bot account.
+
+The repository and wheel already include the default `BandiBot.onnx` model and
+activation sound. See [Wake Word Setup](#wake-word-setup) only if you want to
+replace the bundled model.
 
 ---
 
@@ -345,8 +350,9 @@ English or Spanish based on the recognized command. STT itself defaults to
 Deepgram's multilingual `multi` mode and can handle code-switching.
 
 YouTube challenge solving is configured centrally in `core/config.py` with Node
-and the `ejs:github` remote component source. Node 22+ must be installed and
-available on PATH.
+and the `ejs:github` remote component source. A current Node.js release must be
+installed and available on `PATH`; startup preflight verifies that the `node`
+executable is present.
 
 If YouTube starts returning playable-search results but every stream fails with
 `HTTP Error 403: Forbidden`, update yt-dlp to the current pre-release/nightly:
@@ -382,7 +388,7 @@ Adjust the following constants in `voice/listener.py` to tune detection:
 
 ### Notes on Discord Audio
 
-Discord's Opus codec introduces audio degradation compared to a direct microphone signal. Models trained on clean microphone audio will score lower on Discord-processed audio. For best results, record training samples through Discord itself using the `debug_capture.wav` output (enable in `voice/listener.py`) and include those in your training set.
+Discord's Opus codec introduces audio degradation compared to a direct microphone signal. Models trained on clean microphone audio will score lower on Discord-processed audio. For troubleshooting or model training, the commented debug-capture block in `voice/listener.py` can write `debug_capture.wav`; do not leave it enabled during normal operation.
 
 ---
 
@@ -430,7 +436,8 @@ BandiBot/
 ├── assets/
 │   ├── __init__.py
 │   ├── BandiBot.onnx       # Wake word model expected by voice/listener.py
-│   └── wake_activation.wav # Wake word confirmation sound
+│   ├── wake_activation.wav # Wake word confirmation sound
+│   └── bandibot_icon.ico   # Application icon
 │
 ├── data/
 │   ├── __init__.py
@@ -441,6 +448,7 @@ BandiBot/
 │   ├── test_retrieval.py           # Local RAG and lore fallback tests
 │   ├── test_music_tools.py         # Music intent and tool safety tests
 │   ├── test_music_player.py        # Playback race and queue restoration tests
+│   ├── test_playback_recovery.py    # Stop, reconnect, and late-callback races
 │   ├── test_interaction_logging.py # Privacy and usage logging tests
 │   ├── test_instance_lock.py         # Single-process guard tests
 │   ├── test_preflight.py            # Startup validation tests
@@ -450,6 +458,9 @@ BandiBot/
 │   ├── test_tts.py                 # TTS providers, conversion, and fallback
 │   ├── test_voice_timeouts.py      # STT/LLM timeout state recovery
 │   └── test_repository_hygiene.py  # Private files and cache ignore rules
+│
+├── scripts/
+│   └── check_wheel.py      # Installed-wheel contents and entry-point check
 │
 ├── __main__.py             # Direct module entry point
 ├── pyproject.toml          # Package config, bandibot CLI entry point
@@ -466,7 +477,8 @@ BandiBot/
 ## Testing
 
 The test suite is offline and mocks provider behavior; it does not contact
-Discord, Gemini, Deepgram, or ElevenLabs and does not spend API credits.
+Discord, OpenAI, Gemini, Deepgram, ElevenLabs, or YouTube and does not spend API
+credits.
 
 ```powershell
 python -m pytest tests -q
@@ -485,13 +497,16 @@ The tests cover:
   partial provider stream
 - Runtime voice/music shutdown cleanup, listener lifecycle serialization, and
   failure isolation
-- Late resolution after stop/disconnect/recovery, cancellation of preloaded
-  tracks, expired stream refresh, and stopping paused or looping playback
+- Late resolution after stop/disconnect/recovery, cancellation of preloaded and
+  initial song searches, expired stream refresh, and stopping paused or looping
+  playback
+- Stale Now Playing delivery after stop, including the Discord message-send
+  timing window
 - Voice search acknowledgement overlap, English/Spanish routing, and
   cancellation behavior
 - Private context separation and ignored test-cache directories
 
-The suite currently contains **139 tests**. The only expected warning is Python's
+The suite currently contains **142 tests**. The only expected warning is Python's
 `audioop` deprecation warning from the Discord dependency.
 
 For a local syntax check, compile the edited modules with:
