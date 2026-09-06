@@ -15,5 +15,9 @@ bandibot = "core.client:main"
 [project.optional-dependencies]
 test = ["pytest>=8,<10"]
 
+[tool.pytest.ini_options]
+# Avoid temporary cache directories left by restricted Windows sessions.
+addopts = "-p no:cacheprovider"
+
 [tool.setuptools.packages.find]
 where = ["."]
