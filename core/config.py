@@ -34,6 +34,9 @@ DEEPGRAM_API_KEY: str = os.getenv("DEEPGRAM_API_KEY", "")
 if not DEEPGRAM_API_KEY:
     raise RuntimeError("DEEPGRAM_API_KEY is not set in .env")
 
+STT_MODEL: str = os.getenv("STT_MODEL", "nova-3")
+STT_LANGUAGE: str = os.getenv("STT_LANGUAGE", "multi")
+
 # ── TTS Providers ────────────────────────────────────────────
 # Change TTS_PROVIDER and restart the bot to switch providers.
 TTS_PROVIDER: str = os.getenv("TTS_PROVIDER", "kokoro").lower()
@@ -43,6 +46,11 @@ if TTS_PROVIDER not in {"deepgram", "kokoro", "elevenlabs"}:
 ELEVENLABS_API_KEY: str = os.getenv("ELEVENLABS_API_KEY", "")
 ELEVENLABS_VOICE_ID: str = os.getenv("ELEVENLABS_VOICE_ID", "JBFqnCBsd6RMkjVDRZzb")
 ELEVENLABS_MODEL: str = os.getenv("ELEVENLABS_MODEL", "eleven_multilingual_v2")
+DEEPGRAM_TTS_MODEL: str = os.getenv("DEEPGRAM_TTS_MODEL", "aura-2-javier-es")
+DEEPGRAM_TTS_SPEED: float = float(os.getenv("DEEPGRAM_TTS_SPEED", "1.3"))
+KOKORO_VOICE: str = os.getenv("KOKORO_VOICE", "ef_dora")
+KOKORO_LANG: str = os.getenv("KOKORO_LANG", "e")
+KOKORO_SPEED: float = float(os.getenv("KOKORO_SPEED", "1.1"))
 
 # ── YouTube / yt-dlp ─────────────────────────────────────────
 # Fixed runtime settings for this deployment's YouTube challenge solver.

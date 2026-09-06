@@ -284,15 +284,106 @@ TOOL_HANDLERS = {
     "web_search": _handle_web_search,
 }
 
+_TOOL_ARGUMENT_KEYS = {
+    "play_music": {"query"},
+    "queue_bulk": {"queries", "is_playlist"},
+    "move_track": {"from_position", "to_position", "track_name"},
+    "delete_track": {"positions", "position", "track_name"},
+    "get_server_info": {"question"},
+    "web_search": {"question"},
+}
+_TOOL_REQUIRED_ARGUMENTS = {
+    "play_music": {"query"},
+    "queue_bulk": {"queries", "is_playlist"},
+    "move_track": {"to_position"},
+    "get_server_info": {"question"},
+    "web_search": {"question"},
+}
+
+
+def _validate_tool_call(name, args) -> str | None:
+    """Validate model output before handing it to a side-effecting handler."""
+    if not isinstance(args, dict):
+        return "Tool arguments must be an object."
+
+    allowed = _TOOL_ARGUMENT_KEYS.get(name, set())
+    unexpected = set(args) - allowed
+    if unexpected:
+        return f"Unexpected argument(s): {', '.join(sorted(unexpected))}."
+
+    missing = _TOOL_REQUIRED_ARGUMENTS.get(name, set()) - set(args)
+    if missing:
+        return f"Missing required argument(s): {', '.join(sorted(missing))}."
+
+    if name == "play_music":
+        if not isinstance(args["query"], str) or not args["query"].strip():
+            return "The music query must be a non-empty string."
+        if len(args["query"]) > 500:
+            return "The music query is too long."
+    elif name == "queue_bulk":
+        queries = args["queries"]
+        if not isinstance(queries, list) or not all(isinstance(query, str) for query in queries):
+            return "Queue queries must be a list of strings."
+        if not queries or len(queries) > 50:
+            return "Queue queries must contain between 1 and 50 items."
+        if any(not query.strip() or len(query) > 500 for query in queries):
+            return "Each queue query must be a non-empty string of 500 characters or fewer."
+        if not isinstance(args["is_playlist"], bool):
+            return "is_playlist must be a boolean."
+    elif name == "move_track":
+        if not isinstance(args["to_position"], int) or isinstance(args["to_position"], bool):
+            return "to_position must be an integer."
+        if args["to_position"] < 1:
+            return "to_position must be at least 1."
+        if "from_position" in args and (
+            not isinstance(args["from_position"], int)
+            or isinstance(args["from_position"], bool)
+            or args["from_position"] < 1
+        ):
+            return "from_position must be a positive integer."
+        if "track_name" in args and (
+            not isinstance(args["track_name"], str) or len(args["track_name"]) > 500
+        ):
+            return "track_name must be a string of 500 characters or fewer."
+    elif name == "delete_track":
+        if "positions" in args and (
+            not isinstance(args["positions"], list)
+            or not all(isinstance(position, int) and not isinstance(position, bool) for position in args["positions"])
+        ):
+            return "positions must be a list of integers."
+        if "position" in args and (
+            not isinstance(args["position"], int)
+            or isinstance(args["position"], bool)
+        ):
+            return "position must be an integer."
+        if "track_name" in args and not isinstance(args["track_name"], str):
+            return "track_name must be a string."
+    elif name in {"get_server_info", "web_search"}:
+        if not isinstance(args["question"], str) or not args["question"].strip():
+            return "question must be a non-empty string."
+        if len(args["question"]) > 2000:
+            return "question is too long."
+
+    return None
+
 
 async def execute_tool_call(tool_call, message):
-    name = tool_call["name"]
-    args = tool_call["arguments"]
+    if not isinstance(tool_call, dict):
+        return "Invalid tool call."
+    name = tool_call.get("name")
+    args = tool_call.get("arguments", {})
+    if not isinstance(name, str):
+        return "Invalid tool name."
     logger.info("[tool] %s", name)
 
     handler = TOOL_HANDLERS.get(name)
     if handler is None:
         return f"Unknown tool: {name}"
+
+    validation_error = _validate_tool_call(name, args)
+    if validation_error:
+        logger.warning("[tool] rejected %s: %s", name, validation_error)
+        return f"Invalid arguments for {name}: {validation_error}"
 
     try:
         return await handler(message, args)

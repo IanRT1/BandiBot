@@ -109,6 +109,7 @@ async def _search_acknowledgement(text: str) -> str:
 
 async def _song_confirmation(text: str, details: str, *, searching: bool) -> str:
     """Generate a compact song acknowledgement using request or confirmed outcome."""
+    started = time.perf_counter()
     language = "Spanish" if _looks_like_spanish(text) else "English"
     instruction = (
         f"Respond in {language}. Say you are playing the requested song. Use the natural "
@@ -135,9 +136,21 @@ async def _song_confirmation(text: str, details: str, *, searching: bool) -> str
             "reasoning_effort": "none",
         }), timeout=5.0)
         if response:
-            return (response["choices"][0]["message"].get("content") or "").strip()
+            result = (response["choices"][0]["message"].get("content") or "").strip()
+            logger.debug(
+                "[voice] song confirmation LLM completed in %.0fms | searching=%s | result=%s",
+                (time.perf_counter() - started) * 1000,
+                searching,
+                "ok" if result else "empty",
+            )
+            return result
     except Exception as exc:
-        logger.debug("[voice] song confirmation unavailable: %s", exc)
+        logger.debug(
+            "[voice] song confirmation LLM failed after %.0fms | searching=%s: %s",
+            (time.perf_counter() - started) * 1000,
+            searching,
+            exc,
+        )
     if searching:
         return ""
     outcome = json.loads(details)
@@ -168,6 +181,7 @@ async def _announce_song_search(guild, text: str, query: str, playback_task):
     acknowledgement = await _song_confirmation(text, query, searching=True)
     if not acknowledgement:
         return
+    logger.debug("[voice] song search acknowledgement ready; starting TTS")
     log_message(logger, "voice", "bot", "BandiBot", acknowledgement)
     await speak(session._voice_client, acknowledgement, guild=guild, clip_buffer=session.clip_buffer)
 

@@ -32,6 +32,7 @@ import wave
 import discord
 
 from core.config import TTS_PROVIDER
+from core.paths import assets_root
 from voice.tts_providers import (
     KOKORO_CHUNK_SIZE,
     create_tts_provider,
@@ -214,7 +215,7 @@ async def play_activation(voice_client: discord.VoiceClient):
     if not voice_client or not voice_client.is_connected():
         return
 
-    wav_path = os.path.join(os.path.dirname(__file__), "..", "assets", "wake_activation.wav")
+    wav_path = str(assets_root() / "wake_activation.wav")
     if not os.path.exists(wav_path):
         logger.warning("[tts]  x wake_activation.wav not found")
         return

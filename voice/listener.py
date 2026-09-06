@@ -47,6 +47,7 @@ from openwakeword.model import Model
 
 from silero_vad import load_silero_vad
 from core.interaction_logging import log_message, log_done, track_usage
+from core.paths import assets_root
 from bot.utils import clean_username
 from voice.audio import (
     mono48k_to_16k,
@@ -112,7 +113,7 @@ TTS_TIMEOUT_SECONDS = 120
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-WAKEWORD_MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "assets", "BandiBot.onnx")
+WAKEWORD_MODEL_PATH = str(assets_root() / "BandiBot.onnx")
 WAKEWORD_THRESHOLD    = 0.05
 WAKEWORD_COOLDOWN     = 2
 HITS_REQUIRED         = 2

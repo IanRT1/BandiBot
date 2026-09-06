@@ -155,3 +155,37 @@ def test_tool_exception_is_returned_without_escaping(monkeypatch):
     )
 
     assert result == "Tool error: simulated failure"
+
+
+def test_malformed_tool_arguments_are_rejected_before_dispatch(monkeypatch):
+    import bot.tool_executor as executor
+
+    called = []
+
+    async def handler(message, args):
+        called.append(args)
+        return "should not run"
+
+    monkeypatch.setitem(executor.TOOL_HANDLERS, "play_music", handler)
+    result = asyncio.run(
+        executor.execute_tool_call(
+            {"name": "play_music", "arguments": {"query": 123}},
+            _message("play something"),
+        )
+    )
+
+    assert result.startswith("Invalid arguments for play_music:")
+    assert not called
+
+
+def test_unknown_tool_arguments_are_rejected():
+    import bot.tool_executor as executor
+
+    result = asyncio.run(
+        executor.execute_tool_call(
+            {"name": "pause_music", "arguments": {"unexpected": True}},
+            _message("pause"),
+        )
+    )
+
+    assert result == "Invalid arguments for pause_music: Unexpected argument(s): unexpected."

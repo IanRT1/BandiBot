@@ -19,6 +19,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
 
+from core.paths import assets_root, data_root, packaged_data_root
+
 logger = logging.getLogger(__name__)
 
 _REQUIRED_KEYS = ("DISCORD_TOKEN", "OPENAI_API_KEY", "DEEPGRAM_API_KEY")
@@ -41,7 +43,7 @@ def run_preflight(
     warmup: Callable[[], str] | None = None,
 ) -> PreflightResult:
     """Validate startup prerequisites and emit a compact operational summary."""
-    root = project_root or Path(__file__).resolve().parents[1]
+    root = project_root
     env = os.environ if environ is None else environ
     summary: list[str] = []
     warnings: list[str] = []
@@ -74,7 +76,7 @@ def run_preflight(
         warnings.append("node unavailable; YouTube challenge solving may fail")
         summary.append("node=missing")
 
-    assets = root / "assets"
+    assets = root / "assets" if root else assets_root()
     missing_assets = [
         name for name in ("BandiBot.onnx", "wake_activation.wav")
         if not (assets / name).is_file()
@@ -85,10 +87,15 @@ def run_preflight(
     else:
         summary.append("voice-assets=ok")
 
-    data = root / "data"
+    data = root / "data" if root else data_root()
+    packaged_data = root / "data" if root else packaged_data_root()
     missing_context = [
         name for name in ("instructions.txt", "server_info.txt")
-        if not ((data / name).is_file() or (data / name.replace(".txt", ".example.txt")).is_file())
+        if not (
+            (data / name).is_file()
+            or (data / name.replace(".txt", ".example.txt")).is_file()
+            or (packaged_data / name.replace(".txt", ".example.txt")).is_file()
+        )
     ]
     if missing_context:
         errors.append(f"missing context files: {', '.join(missing_context)}")

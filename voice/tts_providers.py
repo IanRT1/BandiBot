@@ -17,9 +17,14 @@ import numpy as np
 
 from core.config import (
     DEEPGRAM_API_KEY,
+    DEEPGRAM_TTS_MODEL,
+    DEEPGRAM_TTS_SPEED,
     ELEVENLABS_API_KEY,
     ELEVENLABS_MODEL,
     ELEVENLABS_VOICE_ID,
+    KOKORO_LANG,
+    KOKORO_SPEED,
+    KOKORO_VOICE,
 )
 from voice.audio import float32_24k_to_int16_48k, resample_int16_mono
 from core.interaction_logging import record_usage
@@ -27,11 +32,6 @@ from core.interaction_logging import record_usage
 logger = logging.getLogger(__name__)
 
 TTS_SAMPLE_RATE = 48000
-DEEPGRAM_MODEL = "aura-2-javier-es"
-DEEPGRAM_SPEED = 1.3
-KOKORO_VOICE = "ef_dora"
-KOKORO_LANG = "e"
-KOKORO_SPEED = 1.1
 KOKORO_CHUNK_SIZE = 4096
 ELEVENLABS_PCM_RATE = 24000
 TTS_HTTP_TIMEOUT = aiohttp.ClientTimeout(total=60, connect=10, sock_read=15)
@@ -54,8 +54,8 @@ class DeepgramProvider:
     async def stream_pcm(self, text: str) -> AsyncIterator[bytes]:
         url = (
             "https://api.deepgram.com/v1/speak"
-            f"?model={DEEPGRAM_MODEL}&encoding=linear16"
-            f"&sample_rate={TTS_SAMPLE_RATE}&container=none&speed={DEEPGRAM_SPEED}"
+            f"?model={DEEPGRAM_TTS_MODEL}&encoding=linear16"
+            f"&sample_rate={TTS_SAMPLE_RATE}&container=none&speed={DEEPGRAM_TTS_SPEED}"
         )
         headers = {"Authorization": f"Token {DEEPGRAM_API_KEY}", "Content-Type": "application/json"}
         async with aiohttp.ClientSession(timeout=TTS_HTTP_TIMEOUT) as session:

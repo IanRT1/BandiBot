@@ -130,11 +130,12 @@ for handler in root_logger.handlers:
 logger = logging.getLogger(__name__)
 from core.preflight import run_preflight
 from core.instance_lock import InstanceAlreadyRunning, SingleInstanceLock
+from core.paths import runtime_root
 from core.session_logs import rotate_session_log
 from bot.retrieval import warm_retrieval
 
 instance_lock = SingleInstanceLock(
-    Path(__file__).resolve().parents[1] / "logs" / "bandibot.lock"
+    runtime_root() / "logs" / "bandibot.lock"
 )
 try:
     instance_lock.acquire()
@@ -142,7 +143,7 @@ except InstanceAlreadyRunning as exc:
     logger.critical("[startup] %s", exc)
     raise SystemExit(1)
 
-session_log_path = Path(__file__).resolve().parents[1] / "logs" / "session.log"
+session_log_path = runtime_root() / "logs" / "session.log"
 session_log_path.parent.mkdir(parents=True, exist_ok=True)
 rotate_session_log(session_log_path)
 session_handler = logging.FileHandler(session_log_path, mode="w", encoding="utf-8")

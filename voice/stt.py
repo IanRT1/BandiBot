@@ -26,16 +26,14 @@ import wave
 
 from deepgram import DeepgramClient, PrerecordedOptions
 
-from core.config import DEEPGRAM_API_KEY, LOG_SENSITIVE_CONTENT
+from core.config import DEEPGRAM_API_KEY, LOG_SENSITIVE_CONTENT, STT_LANGUAGE, STT_MODEL
 from core.interaction_logging import record_usage
 
 logger = logging.getLogger(__name__)
 
 _client = DeepgramClient(DEEPGRAM_API_KEY)
-STT_LANGUAGE = "multi"
-
 _OPTIONS = PrerecordedOptions(
-    model="nova-3",
+    model=STT_MODEL,
     language=STT_LANGUAGE,
     smart_format=True,
     punctuate=True,

@@ -33,6 +33,8 @@ import unicodedata
 from collections import Counter
 from dataclasses import dataclass
 
+from core.paths import context_path
+
 logger = logging.getLogger(__name__)
 
 _TOKEN_RE = re.compile(r"[\wÀ-ÿ]+", re.UNICODE)
@@ -68,11 +70,7 @@ class _LoreIndex:
 
 def load_context_file(filename: str) -> str:
     """Load a private context file, falling back to its tracked template."""
-    private_path = os.path.join("data", filename)
-    example_path = os.path.join(
-        "data", filename.removesuffix(".txt") + ".example.txt"
-    )
-    path = private_path if os.path.exists(private_path) else example_path
+    path = context_path(filename)
     try:
         with open(path, "r", encoding="utf-8") as context_file:
             return context_file.read().strip()
