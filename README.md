@@ -184,11 +184,20 @@ therefore use the actual playback result instead of parsing display strings.
 
 ### Python Dependencies
 
-Install all Python dependencies with:
+Runtime dependencies are declared in `pyproject.toml` and installed with the package:
 
 ```bash
-pip install -r requirements.txt
+pip install .
 ```
+
+For editable development with test dependencies:
+
+```bash
+pip install -e ".[test]"
+```
+
+`requirements.txt` remains available for environments that prefer installing
+from a requirements manifest.
 
 ### API Keys
 - [Discord Developer Portal](https://discord.com/developers/applications) — Bot token
@@ -241,16 +250,16 @@ git clone https://github.com/IanRT1/BandiBot.git
 cd BandiBot
 ```
 
-**2. Install Python dependencies**
+**2. Install the package and Python dependencies**
 
 ```bash
-pip install -r requirements.txt
+pip install .
 ```
 
-**3. Install the package**
+For development, use an editable install instead:
 
 ```bash
-pip install -e .
+pip install -e ".[test]"
 ```
 
 **4. Create your `.env` file**
@@ -282,7 +291,7 @@ Put your `BandiBot.onnx` wake word model file in the `assets/` directory. See [W
 bandibot
 ```
 
-The `bandibot` console command is provided by the editable package install.
+The `bandibot` console command is provided by the package install.
 Stop any older BandiBot process before restarting so two Discord voice sessions
 cannot compete for the same bot account.
 
@@ -305,10 +314,28 @@ ELEVENLABS_API_KEY=your_elevenlabs_api_key
 ELEVENLABS_VOICE_ID=your_voice_id
 ELEVENLABS_MODEL=eleven_multilingual_v2
 
+# Speech recognition settings
+STT_MODEL=nova-3
+STT_LANGUAGE=multi
+
+# Deepgram TTS settings
+DEEPGRAM_TTS_MODEL=aura-2-javier-es
+DEEPGRAM_TTS_SPEED=1.3
+
+# Kokoro TTS settings
+KOKORO_VOICE=ef_dora
+KOKORO_LANG=e
+KOKORO_SPEED=1.1
+
 # Logging: INFO is the clean default; use DEBUG for timing/RAG diagnostics.
 LOG_LEVEL=INFO
 # Set to 0 to hide message/response contents.
 LOG_SENSITIVE_CONTENT=1
+
+# Optional writable locations when running outside the source checkout.
+# Defaults to the current working directory and its data/ and logs/ folders.
+# BANDIBOT_RUNTIME_DIR=C:/Users/you/BandiBot
+# BANDIBOT_DATA_DIR=C:/Users/you/BandiBot/data
 ```
 
 `TTS_PROVIDER` supports `kokoro`, `deepgram`, and `elevenlabs`. Provider changes take effect after restarting the bot. `GEMINI_SEARCH_MODEL` is fixed in `core/config.py` and is not a secret.
@@ -366,6 +393,7 @@ BandiBot/
 ├── core/
 │   ├── client.py           # Discord client, event routing, reconnection logic
 │   ├── config.py           # Centralized environment variable loading
+│   ├── paths.py            # Packaged assets and writable runtime paths
 │   ├── instance_lock.py     # Single-process runtime guard
 │   ├── interaction_logging.py # Interaction timing, privacy, and usage logs
 │   ├── session_logs.py       # Two-file session log rotation
@@ -400,10 +428,12 @@ BandiBot/
 │   └── utils.py            # Shared utilities, member presence, time formatting
 │
 ├── assets/
+│   ├── __init__.py
 │   ├── BandiBot.onnx       # Wake word model expected by voice/listener.py
 │   └── wake_activation.wav # Wake word confirmation sound
 │
 ├── data/
+│   ├── __init__.py
 │   ├── instructions.example.txt  # Generic tracked prompt template
 │   └── server_info.example.txt   # Generic tracked server-context template
 │
@@ -459,7 +489,7 @@ The tests cover:
   cancellation behavior
 - Private context separation and ignored test-cache directories
 
-The suite currently contains 110 tests. The only expected warning is Python's
+The suite currently contains 112 tests. The only expected warning is Python's
 `audioop` deprecation warning from the Discord dependency.
 
 For a local syntax check, compile the edited modules with:
@@ -467,6 +497,10 @@ For a local syntax check, compile the edited modules with:
 ```powershell
 python -m py_compile core/client.py music/player.py voice/handler.py voice/listener.py
 ```
+
+CI also builds the wheel, installs it into a clean target directory, and
+verifies that packaged assets and example context files work without the source
+checkout.
 
 The test suite sets placeholder API keys and disables semantic embeddings, so
 it does not require production secrets, private context files, network access,
@@ -495,9 +529,9 @@ restart. Supported providers are `kokoro` (default), `deepgram`, and
 `elevenlabs`. All providers expose the same PCM streaming interface, so the
 Discord playback and music-mixing code is provider-independent.
 
-For Kokoro, change `KOKORO_VOICE`, `KOKORO_LANG`, and `KOKORO_SPEED` in `voice/tts_providers.py`.
+For Kokoro, set `KOKORO_VOICE`, `KOKORO_LANG`, and `KOKORO_SPEED` in `.env`.
 
-For Deepgram, change `DEEPGRAM_MODEL` in `voice/tts_providers.py` to any [Deepgram Aura-2 voice](https://developers.deepgram.com/docs/tts-models). The current model is `aura-2-javier-es` (Spanish male).
+For Deepgram, set `DEEPGRAM_TTS_MODEL` in `.env` to any supported [Deepgram Aura-2 voice](https://developers.deepgram.com/docs/tts-models). The default is `aura-2-javier-es` (Spanish male).
 
 For ElevenLabs, set `TTS_PROVIDER=elevenlabs`, provide `ELEVENLABS_API_KEY`,
 and optionally change `ELEVENLABS_VOICE_ID` or `ELEVENLABS_MODEL` in `.env`.
@@ -508,7 +542,7 @@ Low-level Discord audio buffering lives in `voice/tts_sources.py`. Provider outp
 
 ### STT Language
 
-The default STT language is `multi` in `voice/stt.py`, which supports English/Spanish code-switching better than pinning recognition to only `es`. Change `STT_LANGUAGE` to any [Deepgram-supported language code](https://developers.deepgram.com/docs/languages) if you want to force one language.
+The default STT language is `multi`, which supports English/Spanish code-switching better than pinning recognition to only `es`. Set `STT_LANGUAGE` and `STT_MODEL` in `.env` to use another [Deepgram-supported language or model](https://developers.deepgram.com/docs/languages).
 
 ### Music Volume
 
