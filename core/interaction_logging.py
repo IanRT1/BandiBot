@@ -6,8 +6,11 @@ Shared interaction logging for BandiBot's text chat and voice pipelines.
 Keeps INFO output consistent across both modes with labeled user messages,
 bot replies, and a separate completion line showing total elapsed time.
 
-Token usage:
-  Each interaction collects provider-reported token totals, including calls
+Usage:
+  Collects provider-reported token totals and ElevenLabs credit charges
+  (falling back to input characters when unavailable), other TTS input chars,
+  and submitted WAV duration for successful STT requests. These are usage
+  measurements, not billing credits or costs. Includes calls
   in awaited child tasks. Completion lines list only sources with usage.
   Context-local tracking keeps concurrent interactions independent and is
   reset on success, failure, or cancellation.
@@ -23,31 +26,41 @@ Privacy:
 """
 
 import logging
+import math
 from contextvars import ContextVar
 from functools import wraps
 
 from core.config import LOG_SENSITIVE_CONTENT
 
-_token_usage: ContextVar[dict[str, int] | None] = ContextVar("interaction_token_usage", default=None)
+_usage: ContextVar[dict[tuple[str, str], int | float] | None] = ContextVar("interaction_usage", default=None)
 
 
-def track_token_usage(func):
+def track_usage(func):
     """Isolate each interaction while sharing totals with its awaited tasks."""
     @wraps(func)
     async def wrapped(*args, **kwargs):
-        token = _token_usage.set({})
+        token = _usage.set({})
         try:
             return await func(*args, **kwargs)
         finally:
-            _token_usage.reset(token)
+            _usage.reset(token)
     return wrapped
 
 
 def record_token_usage(source: str, total: int | None):
     """Accumulate provider-reported totals; never estimate missing usage."""
-    usage = _token_usage.get()
-    if usage is not None and isinstance(total, int) and not isinstance(total, bool) and total > 0:
-        usage[source] = usage.get(source, 0) + total
+    if isinstance(total, int) and not isinstance(total, bool):
+        record_usage(source, "tokens", total)
+
+
+def record_usage(source: str, unit: str, amount: int | float | None):
+    """Sum observed usage by provider and unit without mixing billing units."""
+    usage = _usage.get()
+    if (usage is not None and isinstance(amount, (int, float))
+            and not isinstance(amount, bool) and math.isfinite(amount)
+            and (amount > 0 or (unit == "credits" and amount == 0))):
+        key = (source, unit)
+        usage[key] = usage.get(key, 0) + amount
 
 
 def log_message(logger: logging.Logger, mode: str, role: str, name: str, text: str):
@@ -64,10 +77,16 @@ def log_message(logger: logging.Logger, mode: str, role: str, name: str, text: s
 
 
 def log_done(logger: logging.Logger, mode: str, total_ms: float):
-    usage = _token_usage.get()
+    usage = _usage.get()
     suffix = ""
     if usage:
-        suffix = " | tokens: " + ", ".join(
-            f"{source}={total}" for source, total in sorted(usage.items())
+        source_order = {"openai": 0, "gemini": 1, "elevenlabs": 2, "deepgram": 3}
+        suffix = " | " + " | ".join(
+            f"{source}={amount:.1f}s audio" if unit == "audio_seconds"
+            else f"{source}={amount:g} {unit}"
+            for (source, unit), amount in sorted(
+                usage.items(),
+                key=lambda item: (source_order.get(item[0][0], 4), item[0]),
+            )
         )
     logger.info("[%s]  <- done (%.0fms total)%s", mode, total_ms, suffix)

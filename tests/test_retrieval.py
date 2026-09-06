@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 from bot.retrieval import (
     build_retrieval_query,
@@ -21,6 +22,56 @@ from bot.tool_schemas import (
 
 def _tool_names(tools):
     return {tool["function"]["name"] for tool in tools}
+
+
+def test_warm_retrieval_caches_both_lore_variants(monkeypatch):
+    import bot.retrieval as retrieval
+    import numpy as np
+
+    monkeypatch.delenv("BANDIBOT_DISABLE_SEMANTIC_RAG", raising=False)
+    monkeypatch.setattr(retrieval, "_index_cache", {})
+    monkeypatch.setattr(retrieval, "_query_embedding_cache", {})
+    monkeypatch.setattr(retrieval, "load_server_lore", lambda model="": f"# Lore\nBot model: {model}")
+    model = Mock()
+    model.encode.side_effect = lambda texts, **kwargs: np.ones((len(texts), 2))
+    monkeypatch.setattr(retrieval, "_get_embedding_model", lambda: model)
+
+    assert retrieval.warm_retrieval() == "ready"
+    assert len(retrieval._index_cache) == 2
+    assert model.encode.call_count == 2
+    assert retrieval.warm_retrieval() == "ready"
+    assert model.encode.call_count == 2
+    index = next(iter(retrieval._index_cache.values()))
+    retrieval._semantic_scores("question", index)
+    assert model.encode.call_count == 3  # Only the new query is encoded.
+    assert model.encode.call_args.args[0] == ["question"]
+
+
+def test_warm_retrieval_disabled_does_not_load_context_or_model(monkeypatch):
+    import bot.retrieval as retrieval
+
+    monkeypatch.setenv("BANDIBOT_DISABLE_SEMANTIC_RAG", "1")
+    load = Mock(side_effect=AssertionError("must not load"))
+    monkeypatch.setattr(retrieval, "load_server_lore", load)
+    monkeypatch.setattr(retrieval, "_get_embedding_model", load)
+    assert retrieval.warm_retrieval() == "disabled"
+    load.assert_not_called()
+
+
+def test_warm_retrieval_encode_failure_preserves_lexical_fallback(monkeypatch):
+    import bot.retrieval as retrieval
+
+    monkeypatch.delenv("BANDIBOT_DISABLE_SEMANTIC_RAG", raising=False)
+    monkeypatch.setattr(retrieval, "_index_cache", {})
+    monkeypatch.setattr(retrieval, "_embedding_model_failed", False)
+    model = Mock()
+    model.encode.side_effect = RuntimeError("encoder unavailable")
+    monkeypatch.setattr(retrieval, "_embedding_model", model)
+    document = "# Tournament\nThe annual tournament started in 2024."
+    monkeypatch.setattr(retrieval, "load_server_lore", lambda model="": document)
+    assert retrieval.warm_retrieval() == "fallback"
+    assert retrieval._get_embedding_model() is None
+    assert retrieval.retrieve_relevant_chunks(document, "annual tournament")
 
 
 def test_tool_routing_uses_small_groups_for_obvious_requests():

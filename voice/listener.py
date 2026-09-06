@@ -46,7 +46,7 @@ from discord.ext import voice_recv
 from openwakeword.model import Model
 
 from silero_vad import load_silero_vad
-from core.interaction_logging import log_message, log_done, track_token_usage
+from core.interaction_logging import log_message, log_done, track_usage
 from bot.utils import clean_username
 from voice.audio import (
     mono48k_to_16k,
@@ -815,7 +815,7 @@ class GuildVoiceSession:
 
         session = self.get_session(member)
 
-        @track_token_usage
+        @track_usage
         async def _pipeline():
             current_task = asyncio.current_task()
             interaction_start = time.perf_counter()

@@ -48,7 +48,7 @@ from bot.tool_schemas import (
 from bot.openai_client import send_to_openai
 from bot.tool_executor import execute_tool_call, is_music_tool
 from core.config import OPENAI_MODEL
-from core.interaction_logging import log_message, log_done, track_token_usage
+from core.interaction_logging import log_message, log_done, track_usage
 from bot.retrieval import (
     format_retrieved_context,
     load_context_file,
@@ -170,7 +170,7 @@ def build_instruction(bot_display_name, server_name):
     )
 
 
-@track_token_usage
+@track_usage
 async def handle_bot_mention(message, client):
     user_name = clean_username(message.author.nick, message.author.name)
     t_start = time.perf_counter()

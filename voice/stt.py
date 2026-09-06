@@ -21,10 +21,13 @@ Model: nova-3 — Deepgram's general-purpose speech recognition model.
 
 import logging
 import time
+import io
+import wave
 
 from deepgram import DeepgramClient, PrerecordedOptions
 
 from core.config import DEEPGRAM_API_KEY, LOG_SENSITIVE_CONTENT
+from core.interaction_logging import record_usage
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +49,11 @@ async def transcribe(wav_bytes: bytes) -> str:
         logger.debug(f"[stt]  → transcribing {len(wav_bytes) // 1000}KB")
         payload = {"buffer": wav_bytes, "mimetype": "audio/wav"}
         response = await _client.listen.asyncprerecorded.v("1").transcribe_file(payload, _OPTIONS)
+        try:
+            with wave.open(io.BytesIO(wav_bytes), "rb") as audio:
+                record_usage("deepgram", "audio_seconds", audio.getnframes() / audio.getframerate())
+        except (wave.Error, EOFError):
+            logger.debug("[stt] WAV duration unavailable for usage logging")
         alt = response.results.channels[0].alternatives[0]
         transcript = alt.transcript
         confidence = getattr(alt, "confidence", 0.0)

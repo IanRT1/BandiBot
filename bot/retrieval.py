@@ -12,6 +12,8 @@ Retrieval flow:
 Indexing:
   Chunk embeddings are precomputed and cached per document. Query embeddings
   are cached separately so repeated requests do not re-encode the lore.
+  Startup warms the encoder and both chat/voice lore variants before Discord
+  connects. Disabled or unavailable semantic retrieval uses lexical matching.
 
 Fallback behavior:
   Retrieval is local and privacy-preserving. Strong matches can omit redundant
@@ -26,6 +28,7 @@ import logging
 import math
 import os
 import re
+import time
 import unicodedata
 from collections import Counter
 from dataclasses import dataclass
@@ -216,7 +219,7 @@ def _proper_name_terms(chunk: str) -> set[str]:
 
 
 def _get_embedding_model():
-    """Load the multilingual encoder lazily so startup stays lightweight."""
+    """Reuse the encoder, loading it on startup warm-up or first retrieval."""
     global _embedding_model, _embedding_model_failed
     if os.getenv("BANDIBOT_DISABLE_SEMANTIC_RAG") == "1":
         return None
@@ -243,6 +246,42 @@ def _get_embedding_model():
         _embedding_model_failed = True
         logger.warning("[rag] semantic retrieval unavailable; using lexical retrieval: %s", exc)
     return _embedding_model
+
+
+def warm_retrieval() -> str:
+    """Prepare chat/voice lore embeddings before connecting; failure is optional."""
+    global _embedding_model, _embedding_model_failed
+    from core.config import OPENAI_MODEL
+
+    started = time.perf_counter()
+    if os.getenv("BANDIBOT_DISABLE_SEMANTIC_RAG") == "1":
+        logger.info("[startup] retrieval warm-up skipped | semantic=disabled")
+        return "disabled"
+    logger.info("[startup] warming retrieval model and lore index")
+    try:
+        documents = {load_server_lore(OPENAI_MODEL), load_server_lore()}
+        documents.discard("")
+        if not documents:
+            logger.info("[startup] retrieval warm-up skipped | context=empty")
+            return "empty"
+        model = _get_embedding_model()
+        if model is None:
+            logger.info("[startup] retrieval ready | semantic=unavailable | lexical=fallback")
+            return "fallback"
+        for document in documents:
+            index = _build_index(document)
+            if index.chunks and index.embeddings is None:
+                index.embeddings = model.encode(
+                    index.chunks, normalize_embeddings=True, show_progress_bar=False,
+                )
+        logger.info("[startup] retrieval ready (%.0fms total)", (time.perf_counter() - started) * 1000)
+        return "ready"
+    except Exception:
+        _embedding_model = None
+        _embedding_model_failed = True
+        logger.warning("[startup] retrieval warm-up failed | lexical=fallback")
+        logger.debug("[rag] retrieval warm-up failure details", exc_info=True)
+        return "fallback"
 
 
 def _build_index(document: str) -> _LoreIndex:

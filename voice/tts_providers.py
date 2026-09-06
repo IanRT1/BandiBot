@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from collections.abc import AsyncIterator
 from typing import Protocol
 
@@ -21,6 +22,7 @@ from core.config import (
     ELEVENLABS_VOICE_ID,
 )
 from voice.audio import float32_24k_to_int16_48k, resample_int16_mono
+from core.interaction_logging import record_usage
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +67,7 @@ class DeepgramProvider:
                     raise TTSProviderError(
                         f"Deepgram HTTP {resp.status}: {_format_api_error(data)}"
                     )
+                record_usage(self.name, "chars", len(text))
                 async for chunk in resp.content.iter_chunked(4096):
                     if chunk:
                         yield chunk
@@ -119,6 +122,7 @@ class ElevenLabsProvider:
                     raise TTSProviderError(
                         f"ElevenLabs HTTP {resp.status}: {_format_api_error(data)}"
                     )
+                _record_elevenlabs_usage(resp.headers, text)
                 pending = bytearray()
                 async for chunk in resp.content.iter_chunked(4096):
                     if not chunk:
@@ -138,6 +142,20 @@ TTS_PROVIDERS: dict[str, type] = {
     "kokoro": KokoroProvider,
     "elevenlabs": ElevenLabsProvider,
 }
+
+
+def _record_elevenlabs_usage(headers, text: str):
+    """Use reported generation cost; retain input chars if cost is unavailable."""
+    try:
+        credits = float(headers.get("character-cost"))
+    except (TypeError, ValueError):
+        credits = None
+    if credits is not None and math.isfinite(credits) and credits >= 0:
+        record_usage("elevenlabs", "credits", credits)
+        logger.debug("[tts] elevenlabs usage | chars=%d | credits=%g", len(text), credits)
+    else:
+        record_usage("elevenlabs", "chars", len(text))
+        logger.debug("[tts] elevenlabs usage | chars=%d | credits=unavailable", len(text))
 
 
 def create_tts_provider(name: str) -> TTSProvider:

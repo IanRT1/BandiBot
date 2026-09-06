@@ -252,6 +252,9 @@ MAX_RETRIES = 10
 
 
 def main():
+    from bot.retrieval import warm_retrieval
+
+    warm_retrieval()
     retries = 0
     logger.info("[startup] bot initialized; connecting to Discord")
     while retries < MAX_RETRIES:
