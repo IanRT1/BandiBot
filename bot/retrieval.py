@@ -255,18 +255,18 @@ def warm_retrieval() -> str:
 
     started = time.perf_counter()
     if os.getenv("BANDIBOT_DISABLE_SEMANTIC_RAG") == "1":
-        logger.info("[startup] retrieval warm-up skipped | semantic=disabled")
+        logger.debug("[startup] retrieval warm-up skipped | semantic=disabled")
         return "disabled"
-    logger.info("[startup] warming retrieval model and lore index")
+    logger.debug("[startup] warming retrieval model and lore index")
     try:
         documents = {load_server_lore(OPENAI_MODEL), load_server_lore()}
         documents.discard("")
         if not documents:
-            logger.info("[startup] retrieval warm-up skipped | context=empty")
+            logger.debug("[startup] retrieval warm-up skipped | context=empty")
             return "empty"
         model = _get_embedding_model()
         if model is None:
-            logger.info("[startup] retrieval ready | semantic=unavailable | lexical=fallback")
+            logger.debug("[startup] retrieval ready | semantic=unavailable | lexical=fallback")
             return "fallback"
         for document in documents:
             index = _build_index(document)
@@ -274,7 +274,7 @@ def warm_retrieval() -> str:
                 index.embeddings = model.encode(
                     index.chunks, normalize_embeddings=True, show_progress_bar=False,
                 )
-        logger.info("[startup] retrieval ready (%.0fms total)", (time.perf_counter() - started) * 1000)
+        logger.debug("[startup] retrieval ready (%.0fms total)", (time.perf_counter() - started) * 1000)
         return "ready"
     except Exception:
         _embedding_model = None

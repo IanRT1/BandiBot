@@ -76,7 +76,7 @@ def log_message(logger: logging.Logger, mode: str, role: str, name: str, text: s
         logger.debug("[%s] %s message | chars=%d", mode, role, len(text))
 
 
-def log_done(logger: logging.Logger, mode: str, total_ms: float):
+def log_done(logger: logging.Logger, mode: str, total_ms: float, status: str = "done"):
     usage = _usage.get()
     suffix = ""
     if usage:
@@ -89,4 +89,4 @@ def log_done(logger: logging.Logger, mode: str, total_ms: float):
                 key=lambda item: (source_order.get(item[0][0], 4), item[0]),
             )
         )
-    logger.info("[%s]  <- done (%.0fms total)%s", mode, total_ms, suffix)
+    logger.info("[%s]  <- %s (%.0fms total)%s", mode, status, total_ms, suffix)

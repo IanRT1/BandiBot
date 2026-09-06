@@ -140,8 +140,9 @@ root_logger.addHandler(session_handler)
 logger = logging.getLogger(__name__)
 logger.info("[startup] initializing BandiBot")
 from core.preflight import run_preflight
+from bot.retrieval import warm_retrieval
 
-if not run_preflight().ok:
+if not run_preflight(warmup=warm_retrieval).ok:
     logger.critical("[startup] preflight failed; bot not started")
     raise SystemExit(1)
 
@@ -252,9 +253,6 @@ MAX_RETRIES = 10
 
 
 def main():
-    from bot.retrieval import warm_retrieval
-
-    warm_retrieval()
     retries = 0
     logger.info("[startup] bot initialized; connecting to Discord")
     while retries < MAX_RETRIES:

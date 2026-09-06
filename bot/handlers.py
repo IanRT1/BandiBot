@@ -167,6 +167,14 @@ def build_instruction(bot_display_name, server_name):
     return _INSTRUCTIONS_TEMPLATE.format(
         bot_display_name=bot_display_name,
         server_name=server_name,
+    ) + (
+        "\nFor questions requiring current external information, use web_search before answering. "
+        "This includes live or recent sports scores, team standings/results, weather, schedules, "
+        "prices, and recent news, even when the user does not explicitly request a search. "
+        "Do not say you lack live access when web_search is available. Infer the likely public "
+        "entity from context; clarify only when ambiguity would materially change the search. "
+        "Retrieved server lore may be irrelevant and does not replace live information. "
+        "Stable knowledge and ordinary conversation do not require searching."
     )
 
 
@@ -249,6 +257,7 @@ async def handle_bot_mention(message, client):
             user_message,
             lore_is_confident=has_retrieved_lore,
             has_lore_context=has_lore_context,
+            allow_live_search=True,
         )
 
         response_data = await send_to_openai(

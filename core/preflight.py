@@ -13,6 +13,8 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
@@ -36,6 +38,7 @@ class PreflightResult:
 def run_preflight(
     project_root: Path | None = None,
     environ: Mapping[str, str] | None = None,
+    warmup: Callable[[], str] | None = None,
 ) -> PreflightResult:
     """Validate startup prerequisites and emit a compact operational summary."""
     root = project_root or Path(__file__).resolve().parents[1]
@@ -91,6 +94,16 @@ def run_preflight(
         errors.append(f"missing context files: {', '.join(missing_context)}")
     else:
         summary.append("context=ok")
+
+    if not errors and warmup is not None:
+        started = time.perf_counter()
+        try:
+            retrieval_status = warmup()
+        except Exception:
+            retrieval_status = "fallback"
+            logger.debug("[startup] retrieval warm-up failed", exc_info=True)
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        summary.append(f"retrieval={retrieval_status} ({elapsed_ms:.0f}ms)")
 
     result = PreflightResult(
         ok=not errors,

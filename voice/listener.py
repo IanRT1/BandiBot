@@ -429,7 +429,7 @@ class BandiBotSink(voice_recv.AudioSink):
                         "[voice] interrupting current TTS for a repeated wake word"
                     )
                     asyncio.run_coroutine_threadsafe(
-                        self.gs._interrupt_current(), self.gs.loop
+                        self.gs._interrupt_current(uid), self.gs.loop
                     )
                     u.reset()
 
@@ -450,7 +450,7 @@ class BandiBotSink(voice_recv.AudioSink):
                         self.gs._interrupted_pipeline_uids.add(prev_uid)
                         logger.debug("[voice] interrupting current response for a new wake word")
                         asyncio.run_coroutine_threadsafe(
-                            self.gs._interrupt_current(), self.gs.loop
+                            self.gs._interrupt_current(uid), self.gs.loop
                         )
                         prev_u.reset()
 
@@ -575,6 +575,7 @@ class GuildVoiceSession:
         self._pipeline_task: Optional[asyncio.Task] = None
         self._monitor_task: Optional[asyncio.Task] = None
         self._interrupted_pipeline_uids: set[int] = set()
+        self._speech_interrupted_for: set[int] = set()
         self._protected_pipeline_tasks: set[asyncio.Task] = set()
 
         logger.info(f"[voice] ready in {guild.name} | model: {self._oww_model_name}")
@@ -616,9 +617,11 @@ class GuildVoiceSession:
 
         return False
 
-    async def _interrupt_current(self):
+    async def _interrupt_current(self, next_uid: int | None = None):
         """Cancel any in-progress TTS immediately."""
         from voice.tts import cancel_tts
+        if next_uid is not None and self._tts_is_active():
+            self._speech_interrupted_for.add(next_uid)
         cancel_tts(self._voice_client)
         if self._monitor_task and not self._monitor_task.done():
             self._monitor_task.cancel()
@@ -814,11 +817,15 @@ class GuildVoiceSession:
                 return
 
         session = self.get_session(member)
+        pending_interruptions = getattr(self, "_speech_interrupted_for", set())
+        speech_was_interrupted = uid in pending_interruptions
+        pending_interruptions.discard(uid)
 
         @track_usage
         async def _pipeline():
             current_task = asyncio.current_task()
             interaction_start = time.perf_counter()
+            completion_status = "failed"
             try:
                 try:
                     text = await asyncio.wait_for(
@@ -837,7 +844,8 @@ class GuildVoiceSession:
                     return
 
                 if self.sink and self.sink._get_user(uid).interrupted:
-                    logger.info("[voice] ✗ interrupted after STT — dropping response")
+                    completion_status = "interrupted"
+                    logger.debug("[voice] ✗ interrupted after STT — dropping response")
                     self.sink._get_user(uid).reset()
                     return
 
@@ -854,6 +862,7 @@ class GuildVoiceSession:
                         handle_voice_command(
                             text=text, member=member, guild=self.guild,
                             client=self.client, history=session.get_history(),
+                            speech_was_interrupted=speech_was_interrupted,
                         ),
                         timeout=VOICE_COMMAND_TIMEOUT_SECONDS,
                     )
@@ -871,7 +880,8 @@ class GuildVoiceSession:
                     self._interrupted_pipeline_uids.discard(uid)
 
                 if self.sink and (self.sink._get_user(uid).interrupted or was_interrupted):
-                    logger.info("[voice] ✗ interrupted after LLM — dropping TTS")
+                    completion_status = "interrupted"
+                    logger.debug("[voice] ✗ interrupted after LLM — dropping TTS")
                     self.sink._get_user(uid).reset()
                     if response_text:
                         return
@@ -915,13 +925,16 @@ class GuildVoiceSession:
                 else:
                     logger.debug(f"[voice] music command pipeline completed in {elapsed:.0f}ms | no TTS")
 
-                log_done(logger, "voice", (time.perf_counter() - interaction_start) * 1000)
+                if completion_status != "interrupted":
+                    completion_status = "done"
 
             except asyncio.CancelledError:
-                logger.info("[voice] ✗ pipeline task cancelled")
+                completion_status = "interrupted"
+                logger.debug("[voice] pipeline task cancelled")
             except Exception as e:
                 logger.error(f"[voice] pipeline error: {e}")
             finally:
+                log_done(logger, "voice", (time.perf_counter() - interaction_start) * 1000, completion_status)
                 self._interrupted_pipeline_uids.discard(uid)
                 if current_task:
                     self._protected_pipeline_tasks.discard(current_task)

@@ -45,6 +45,9 @@ async def send_to_openai(payload, tools=None):
             "model": model,
             "messages": messages,
         }
+        for option in ("max_completion_tokens", "reasoning_effort"):
+            if option in payload:
+                kwargs[option] = payload[option]
         # GPT-5.6 models only support their default temperature value.
         if not model.startswith("gpt-5.6"):
             kwargs["temperature"] = temperature

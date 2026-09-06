@@ -337,12 +337,24 @@ def select_tools_for_request(
     *,
     lore_is_confident: bool = False,
     has_lore_context: bool = False,
+    allow_live_search: bool = False,
+    allow_song_requests: bool = False,
 ):
     """Choose the smallest safe tool set using local, deterministic signals.
 
     Ambiguous requests deliberately retain the broader tool set so routing
     reliability is preserved. This function never calls a model or a service.
     """
+    if allow_live_search or allow_song_requests:
+        selected = select_tools_for_request(
+            request, lore_is_confident=lore_is_confident, has_lore_context=has_lore_context,
+        )
+        names = {tool["function"]["name"] for tool in selected}
+        required = list(WEB_SEARCH_TOOL) if allow_live_search else []
+        if allow_song_requests:
+            required.extend(tool for tool in MUSIC_TOOLS if tool["function"]["name"] == "play_music")
+        return selected + [tool for tool in required if tool["function"]["name"] not in names]
+
     text = request or ""
     lowered = text.casefold().strip()
 

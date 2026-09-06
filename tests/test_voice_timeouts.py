@@ -69,6 +69,53 @@ def test_stt_timeout_resets_voice_state(monkeypatch):
     assert session._pipeline_task is None
 
 
+def test_interrupted_speech_logs_usage_and_passes_prior_interruption(monkeypatch, caplog):
+    import logging
+    import voice.handler as handler
+    import voice.stt as stt
+    import voice.tts as tts
+    from core.interaction_logging import record_token_usage, record_usage
+
+    _, session, _ = _make_session(monkeypatch)
+    session.client = SimpleNamespace(user=SimpleNamespace(display_name="BandiBot"))
+    session.clip_buffer = None
+    session._speech_interrupted_for = {7}
+
+    async def run():
+        speaking = asyncio.Event()
+
+        async def transcribe(_):
+            record_usage("deepgram", "audio_seconds", 2)
+            return "Stop"
+
+        async def command(**kwargs):
+            assert kwargs["speech_was_interrupted"] is True
+            record_token_usage("openai", 100)
+            return "Stopped.", False
+
+        async def speak(*args, **kwargs):
+            record_usage("elevenlabs", "credits", 10)
+            speaking.set()
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(stt, "transcribe", transcribe)
+        monkeypatch.setattr(handler, "handle_voice_command", command)
+        monkeypatch.setattr(tts, "speak", speak)
+        await session.on_speech_captured(7, b"wav")
+        task = session._pipeline_task
+        await asyncio.wait_for(speaking.wait(), 1)
+        task.cancel()
+        await task
+
+    with caplog.at_level(logging.INFO):
+        asyncio.run(run())
+    summaries = [message for message in caplog.messages if "total)" in message]
+    assert len(summaries) == 1
+    assert "<- interrupted" in summaries[0]
+    assert "openai=100 tokens | elevenlabs=10 credits | deepgram=2.0s audio" in summaries[0]
+    assert not session._speech_interrupted_for
+
+
 def test_command_timeout_resets_voice_state(monkeypatch):
     listener, session, user_state = _make_session(monkeypatch)
     import voice.handler as handler
