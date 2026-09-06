@@ -24,6 +24,7 @@ All API errors are caught and logged; None is returned on failure.
 import json
 import logging
 from core.config import OPENAI_API_KEY, OPENAI_MODEL
+from core.interaction_logging import record_token_usage
 from openai import AsyncOpenAI, APIError, APIConnectionError, RateLimitError
 
 logger = logging.getLogger(__name__)  
@@ -57,12 +58,13 @@ async def send_to_openai(payload, tools=None):
                 kwargs["reasoning_effort"] = payload.get("reasoning_effort", "none")
 
         response = await _client.chat.completions.create(**kwargs)
+        record_token_usage("openai", getattr(response.usage, "total_tokens", None))
         msg = response.choices[0].message
 
         usage = {
-            "prompt_tokens": response.usage.prompt_tokens,
-            "completion_tokens": response.usage.completion_tokens,
-            "total_tokens": response.usage.total_tokens,
+            "prompt_tokens": getattr(response.usage, "prompt_tokens", 0),
+            "completion_tokens": getattr(response.usage, "completion_tokens", 0),
+            "total_tokens": getattr(response.usage, "total_tokens", 0),
         }
 
         if msg.tool_calls:

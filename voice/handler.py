@@ -301,7 +301,7 @@ async def handle_voice_command(
         if called_music:
             elapsed = (time.perf_counter() - t_start) * 1000
             tool_names = [tc["name"] for tc in tool_calls]
-            logger.info(f"[llm]  ← {', '.join(tool_names)} ({elapsed:.0f}ms) | no TTS")
+            logger.debug(f"[voice]  ← {', '.join(tool_names)} ({elapsed:.0f}ms) | no TTS")
             return "", False
 
         t_followup = time.perf_counter()
@@ -321,12 +321,9 @@ async def handle_voice_command(
     response_text = raw.strip() if raw else "Listo."
 
     elapsed = (time.perf_counter() - t_start) * 1000
-    preview = " ".join(response_text.split())
-    if len(preview) > 160:
-        preview = preview[:159] + "…"
-    logger.info(
-        "[voice] response ready | %.0fms | response=%s",
-        elapsed, preview,
+    logger.debug(
+        "[voice] response processed | chars=%d | total=%.0fms",
+        len(response_text), elapsed,
     )
 
     return response_text, should_leave

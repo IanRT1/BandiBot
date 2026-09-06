@@ -269,4 +269,4 @@ def _log_first_chunk(t_start: float):
 
 def _log_done(t_start: float):
     elapsed = (time.perf_counter() - t_start) * 1000
-    logger.info(f"[tts]  <- done ({elapsed:.0f}ms total)")
+    logger.debug(f"[tts]  <- done ({elapsed:.0f}ms total)")

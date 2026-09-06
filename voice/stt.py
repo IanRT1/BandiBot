@@ -24,7 +24,7 @@ import time
 
 from deepgram import DeepgramClient, PrerecordedOptions
 
-from core.config import DEEPGRAM_API_KEY
+from core.config import DEEPGRAM_API_KEY, LOG_SENSITIVE_CONTENT
 
 logger = logging.getLogger(__name__)
 
@@ -51,12 +51,12 @@ async def transcribe(wav_bytes: bytes) -> str:
         confidence = getattr(alt, "confidence", 0.0)
         elapsed = (time.perf_counter() - t) * 1000
         if transcript:
-            logger.info(
-                f"[stt]  ← {transcript!r} "
+            logger.debug(
+                f"[stt]  ← {transcript if LOG_SENSITIVE_CONTENT else '[redacted]'!r} "
                 f"(lang={STT_LANGUAGE}, conf={confidence:.2f}, {elapsed:.0f}ms)"
             )
         else:
-            logger.info(
+            logger.debug(
                 f"[stt]  ✗ empty "
                 f"(lang={STT_LANGUAGE}, conf={confidence:.2f}, {elapsed:.0f}ms)"
             )

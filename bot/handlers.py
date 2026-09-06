@@ -47,7 +47,8 @@ from bot.tool_schemas import (
 )
 from bot.openai_client import send_to_openai
 from bot.tool_executor import execute_tool_call, is_music_tool
-from core.config import LOG_SENSITIVE_CONTENT, OPENAI_MODEL
+from core.config import OPENAI_MODEL
+from core.interaction_logging import log_message, log_done, track_token_usage
 from bot.retrieval import (
     format_retrieved_context,
     load_context_file,
@@ -169,22 +170,19 @@ def build_instruction(bot_display_name, server_name):
     )
 
 
+@track_token_usage
 async def handle_bot_mention(message, client):
     user_name = clean_username(message.author.nick, message.author.name)
-    msg_len = len(message.content)
     t_start = time.perf_counter()
-    total_tokens = 0
 
-    if LOG_SENSITIVE_CONTENT:
-        logger.info("[chat] received (%d chars): %s", msg_len, _log_preview(message.content))
-    else:
-        logger.info("[chat] received message (%d chars)", msg_len)
+    log_message(logger, "chat", "user", user_name, _strip_bot_mentions(message, client))
 
     # ── Audio attachment shortcut — bypass LLM entirely ───────────────────────
     audio_attachments = get_audio_attachments(message)
     if audio_attachments:
         logger.info(f"  {len(audio_attachments)} audio attachment(s) detected — queuing directly")
         await handle_audio_attachments(message, audio_attachments)
+        log_done(logger, "chat", (time.perf_counter() - t_start) * 1000)
         return
 
     async with message.channel.typing():
@@ -270,7 +268,6 @@ async def handle_bot_mention(message, client):
                 logger.error(f"Failed to send error reply: {e}")
             return
 
-        total_tokens += response_data.get("usage", {}).get("total_tokens", 0)
 
         msg = response_data["choices"][0]["message"]
         tool_calls = msg.get("tool_calls")
@@ -354,31 +351,17 @@ async def handle_bot_mention(message, client):
                     logger.error(f"Failed to send error reply: {e}")
                 return
 
-            total_tokens += response_data.get("usage", {}).get("total_tokens", 0)
 
         response_text = process_openai_response(data=response_data, message=message, client=client)
         await send_response_to_channel(message, response_text)
 
     total_ms = (time.perf_counter() - t_start) * 1000
-    if LOG_SENSITIVE_CONTENT:
-        logger.info(
-            "[chat] response sent (%d chars) | llm %.0fms | total %.0fms | response=%s",
-            len(response_text), llm_ms, total_ms, _log_preview(response_text),
-        )
-    else:
-        logger.info(
-            "[chat] response sent (%d chars) | llm %.0fms | total %.0fms",
-            len(response_text), llm_ms, total_ms,
-        )
-
-
-def _log_preview(text: str, limit: int = 160) -> str:
-    """Return a compact, single-line response preview for operational logs."""
-    preview = re.sub(r"<@!?\d+>", "@bot", text or "")
-    preview = " ".join(preview.split())
-    if len(preview) > limit:
-        return preview[: limit - 1] + "…"
-    return preview
+    log_message(logger, "chat", "bot", client.user.display_name, response_text)
+    logger.debug(
+        "[chat] response processed | chars=%d | llm=%.0fms | total=%.0fms",
+        len(response_text), llm_ms, total_ms,
+    )
+    log_done(logger, "chat", total_ms)
 
 
 async def fetch_recent_messages(channel, client, limit=20, exclude_message_id=None):

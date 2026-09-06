@@ -46,6 +46,8 @@ from discord.ext import voice_recv
 from openwakeword.model import Model
 
 from silero_vad import load_silero_vad
+from core.interaction_logging import log_message, log_done, track_token_usage
+from bot.utils import clean_username
 from voice.audio import (
     mono48k_to_16k,
     mono_to_stereo,
@@ -813,8 +815,10 @@ class GuildVoiceSession:
 
         session = self.get_session(member)
 
+        @track_token_usage
         async def _pipeline():
             current_task = asyncio.current_task()
+            interaction_start = time.perf_counter()
             try:
                 try:
                     text = await asyncio.wait_for(
@@ -837,7 +841,7 @@ class GuildVoiceSession:
                     self.sink._get_user(uid).reset()
                     return
 
-                logger.debug("[voice] transcription received (%d chars)", len(text))
+                log_message(logger, "voice", "user", clean_username(getattr(member, "nick", None), member.name), text)
                 session.add("user", text)
                 t = time.perf_counter()
                 likely_playback = _looks_like_playback_command(text)
@@ -873,6 +877,7 @@ class GuildVoiceSession:
                         return
 
                 if response_text:
+                    log_message(logger, "voice", "bot", self.client.user.display_name, response_text)
                     session.add("assistant", response_text)
                     try:
                         await asyncio.wait_for(
@@ -909,6 +914,8 @@ class GuildVoiceSession:
                         self.sink = None
                 else:
                     logger.debug(f"[voice] music command pipeline completed in {elapsed:.0f}ms | no TTS")
+
+                log_done(logger, "voice", (time.perf_counter() - interaction_start) * 1000)
 
             except asyncio.CancelledError:
                 logger.info("[voice] ✗ pipeline task cancelled")

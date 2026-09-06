@@ -9,6 +9,7 @@ import logging
 import aiohttp
 
 from core.config import GEMINI_API_KEY, GEMINI_SEARCH_MODEL
+from core.interaction_logging import record_token_usage
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +95,7 @@ async def search_web(question: str) -> str:
         logger.error("Gemini web search connection failed: %s", exc)
         return "Google web search is temporarily unavailable."
 
+    record_token_usage("gemini", (data.get("usage") or {}).get("total_tokens"))
     answer, sources = _extract_text_and_sources(data)
     if not answer:
         return "I couldn't find a useful answer from Google."
