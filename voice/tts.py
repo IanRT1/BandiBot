@@ -75,7 +75,7 @@ async def speak(
         return
 
     t_start = time.perf_counter()
-    logger.info(f"[tts]  -> speaking ({len(text)} chars) via {TTS_PROVIDER}")
+    logger.debug(f"[tts]  -> speaking ({len(text)} chars) via {TTS_PROVIDER}")
 
     source = getattr(voice_client, "source", None)
     is_mixer = isinstance(source, MixerSource) and voice_client.is_playing()
@@ -149,7 +149,7 @@ async def _speak_standalone(
             first_chunk = True
             async for chunk in _iter_provider_pcm(text):
                 if source.is_cancelled():
-                    logger.info("[tts]  -> standalone stream cancelled mid-flight")
+                    logger.debug("[tts]  -> standalone stream cancelled mid-flight")
                     return
 
                 if first_chunk:
@@ -160,7 +160,7 @@ async def _speak_standalone(
                     source.feed(feed_chunk)
 
             source.set_done()
-            logger.info("[tts]  -> all chunks streamed, waiting for playback")
+            logger.debug("[tts]  -> all chunks streamed, waiting for playback")
 
         except asyncio.CancelledError:
             source.cancel()
@@ -223,7 +223,7 @@ async def play_activation(voice_client: discord.VoiceClient):
     else:
         await _play_activation_standalone(voice_client, wav_path)
 
-    logger.info("[tts]  <- activation sound done")
+    logger.debug("[tts]  <- activation sound done")
 
 
 async def _play_activation_mixed(source: MixerSource, wav_path: str):
@@ -264,7 +264,7 @@ async def _play_activation_standalone(voice_client: discord.VoiceClient, wav_pat
 
 def _log_first_chunk(t_start: float):
     t_first = (time.perf_counter() - t_start) * 1000
-    logger.info(f"[tts]  -> first chunk in {t_first:.0f}ms")
+    logger.debug(f"[tts]  -> first chunk in {t_first:.0f}ms")
 
 
 def _log_done(t_start: float):

@@ -65,9 +65,13 @@ Every instance is independently hosted by the user. There is no central server, 
 
 ### Reliability and Privacy
 - **Structured runtime logs** with separate startup, chat, voice, STT, TTS, tool, and RAG events
+- **Per-session diagnostics** — `logs/session.log` is overwritten on startup and always captures `DEBUG` detail locally
+- **Selective tool routing** — obvious music, voice, web, member-activity, lore, and casual requests receive only the smallest safe tool set; ambiguous requests retain the full fallback set
 - **Transparent chat logs** — message and response previews are shown by default; set `LOG_SENSITIVE_CONTENT=0` to hide conversation contents
 - **Quiet local embeddings** — casual or very short messages without a lore/name signal skip semantic retrieval, and Sentence Transformers progress output is disabled
-- **Connection-aware logging** — bursts of Discord voice crypto/decryption packet errors produce one sink-restart warning instead of flooding the log
+- **Startup preflight** — required configuration, runtime dependencies, voice assets, and context files are validated before connecting to Discord
+- **Graceful shutdown and recovery** — active voice/music sessions are cleaned up on exit; transient connection failures retry with bounded backoff, while invalid credentials stop immediately
+- **Connection-aware logging** — bursts of Discord voice crypto/decryption packet errors produce one aggregated warning instead of flooding the log
 - **Quiet startup logging** — normal connection attempts are implicit; retry attempts are logged only after a connection failure
 - **Private deployment context** — personal instructions and server lore stay local and are excluded from Git
 - **Generic tracked templates** — new deployments can use safe `*.example.txt` files without exposing server-specific information
@@ -414,9 +418,10 @@ The tests cover:
 - TTS provider registration, PCM conversion, error parsing, automatic
   ElevenLabs-to-Kokoro fallback, and prevention of repeated speech after a
   partial provider stream
+- Runtime voice/music shutdown cleanup and failure isolation
 - Private context separation and ignored test-cache directories
 
-The suite currently contains 39 tests. The only expected warning is Python's
+The suite currently contains 54 tests. The only expected warning is Python's
 `audioop` deprecation warning from the Discord dependency.
 
 GitHub Actions runs the same test suite and a Python compilation check on every

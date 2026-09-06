@@ -20,7 +20,7 @@ Use standard Python style with 4-space indentation, type hints where they clarif
 
 ## Testing Guidelines
 
-There is no committed test suite yet. For changes, at minimum run `python -m py_compile` on edited Python files or the touched package directories. When adding tests, place them under `tests/`, use `pytest`, name files `test_*.py`, and mock Discord, OpenAI, Deepgram, and yt-dlp calls rather than hitting live services.
+The repository has an offline pytest suite under `tests/` covering retrieval/RAG, tool routing, music queue safety, voice timeout recovery, TTS fallback, and repository hygiene. Run `python -m pytest tests -q` for the full suite. For changes, also run `python -m py_compile` on edited Python files. Keep tests named `test_*.py` and mock Discord, OpenAI, Deepgram, Gemini, and yt-dlp calls rather than hitting live services. The suite should not require private context files or download models; semantic-RAG tests use mocks or disable the encoder.
 
 ## Commit & Pull Request Guidelines
 

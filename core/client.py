@@ -24,6 +24,7 @@ import sys
 import time
 import warnings
 from collections import deque
+from pathlib import Path
 
 # ── Must be set before any HuggingFace/Kokoro imports ────────────────────────
 # Prevents Kokoro from hitting huggingface.co on every TTS call to check
@@ -114,13 +115,36 @@ import asyncio
 from dotenv import load_dotenv
 
 load_dotenv()
+console_level = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO)
 logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    level=logging.DEBUG,
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%H:%M:%S",
 )
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.DEBUG)
+for handler in root_logger.handlers:
+    if isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler):
+        handler.setLevel(console_level)
+
+session_log_path = Path(__file__).resolve().parents[1] / "logs" / "session.log"
+session_log_path.parent.mkdir(parents=True, exist_ok=True)
+session_handler = logging.FileHandler(session_log_path, mode="w", encoding="utf-8")
+session_handler.setLevel(logging.DEBUG)
+session_handler.setFormatter(logging.Formatter(
+    "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+))
+root_logger.addHandler(session_handler)
+
 logger = logging.getLogger(__name__)
 logger.info("[startup] initializing BandiBot")
+from core.preflight import run_preflight
+
+if not run_preflight().ok:
+    logger.critical("[startup] preflight failed; bot not started")
+    raise SystemExit(1)
+
 logging.getLogger("torio").setLevel(logging.WARNING)
 logging.getLogger("torchaudio").setLevel(logging.WARNING)
 
@@ -144,7 +168,25 @@ logging.getLogger("urllib3").setLevel(logging.WARNING)
 logging.getLogger("websockets").setLevel(logging.WARNING)
 
 intents = discord.Intents.all()
-client = discord.Client(intents=intents)
+
+
+class BandiBotClient(discord.Client):
+    """Discord client with one idempotent application-shutdown cleanup path."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._shutdown_started = False
+
+    async def close(self):
+        if not self._shutdown_started:
+            self._shutdown_started = True
+            logger.info("[shutdown] stopping voice listeners and music players")
+            await voice_listener_manager.shutdown()
+            await voice_manager.shutdown()
+        await super().close()
+
+
+client = BandiBotClient(intents=intents)
 
 
 @client.event
@@ -222,17 +264,33 @@ def main():
         except KeyboardInterrupt:
             logger.info("[startup] shutdown requested by user")
             break
-        except (aiohttp.ClientConnectionError, aiohttp.ClientPayloadError) as e:
+        except discord.LoginFailure as e:
+            logger.critical("[startup] Discord authentication failed: %s", e)
+            break
+        except (
+            aiohttp.ClientConnectionError,
+            aiohttp.ClientPayloadError,
+            discord.GatewayNotFound,
+            discord.ConnectionClosed,
+        ) as e:
             retries += 1
-            wait_time = (2 ** retries) + random.randint(0, 10)
+            wait_time = min(60, (2 ** retries) + random.randint(0, 10))
             logger.critical(
                 "[startup] network error: %s; retry %d/%d in %ds",
                 e, retries, MAX_RETRIES, wait_time,
             )
             time.sleep(wait_time)
         except Exception as e:
-            logger.exception("[startup] unexpected error: %s; exiting", e)
-            break
+            retries += 1
+            if retries >= MAX_RETRIES:
+                logger.exception("[startup] unexpected error after %d attempts; exiting", retries)
+                break
+            wait_time = min(60, 2 ** retries)
+            logger.exception(
+                "[startup] unexpected recoverable error; retry %d/%d in %ds",
+                retries, MAX_RETRIES, wait_time,
+            )
+            time.sleep(wait_time)
     else:
         logger.critical("[startup] exceeded %d retries; giving up", MAX_RETRIES)
 

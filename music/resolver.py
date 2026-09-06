@@ -241,7 +241,7 @@ def resolve_track(
     best_score, best = max(candidate_entries, key=lambda item: item[0])
     if _should_retry_official_audio(query_lower, best_score, best):
         retry_query = f"{query} official audio"
-        logger.info(f"  [yt-dlp] retrying with studio-biased query {retry_query!r}")
+        logger.debug(f"  [yt-dlp] retrying with studio-biased query {retry_query!r}")
         retry_scored_entries = _search_and_score(retry_query, query_lower)
         retry_scored_entries = _filter_excluded_entries(
             retry_scored_entries,
@@ -254,6 +254,8 @@ def resolve_track(
             )
         if retry_scored_entries:
             candidate_entries.extend(retry_scored_entries)
+
+    _log_candidate_scores(candidate_entries)
 
     (
         winner_rank,
@@ -268,7 +270,6 @@ def resolve_track(
         winner_candidate.get("title", "?"),
         winner_candidate.get("uploader") or winner_candidate.get("channel") or "?",
     )
-    logger.info(f"  [yt-dlp] using stream: {best.get('title', '?')!r}")
     return Track(
         title=best.get("title", "Unknown title"),
         stream_url=best["url"],
@@ -287,7 +288,7 @@ def _log_ytdlp_config_once():
     if _LOGGED_YTDLP_CONFIG:
         return
     _LOGGED_YTDLP_CONFIG = True
-    logger.info(
+    logger.debug(
         "[yt-dlp] version=%s js_runtime=%s remote_components=%s",
         yt_dlp.version.__version__,
         YOUTUBE_JS_RUNTIME or "default",
@@ -300,18 +301,18 @@ def _direct_video_url(query: str) -> str | None:
         return query
     if _YOUTUBE_VIDEO_ID_RE.fullmatch(query):
         url = f"https://www.youtube.com/watch?v={query}"
-        logger.info(f"  [yt-dlp] detected YouTube video id {query!r}")
+        logger.debug(f"  [yt-dlp] detected YouTube video id {query!r}")
         return url
     return None
 
 
 def _resolve_direct_url(url: str, requested_by: str) -> Track:
-    logger.info(f"  [yt-dlp] starting resolution for {url!r}")
+    logger.debug(f"  [yt-dlp] starting resolution for {url!r}")
     t = time.time()
     info = _resolve_playable_url(url)
-    logger.info(f"  [yt-dlp] resolved in {time.time() - t:.2f}s")
+    logger.debug(f"  [yt-dlp] resolved in {time.time() - t:.2f}s")
 
-    logger.info(f"  [yt-dlp] using: {info.get('title', '?')!r}")
+    logger.info(f"  [yt-dlp] winner title={info.get('title', '?')!r}")
     return Track(
         title=info.get("title", "Unknown title"),
         stream_url=info["url"],
@@ -327,19 +328,18 @@ def _resolve_direct_url(url: str, requested_by: str) -> Track:
 
 def _search_and_score(search_text: str, query_lower: str) -> list[tuple[int, dict]]:
     search_query = f"ytsearch{_SEARCH_RESULT_COUNT}:{search_text}"
-    logger.info(f"  [yt-dlp] searching {search_query!r}")
+    logger.debug(f"  [yt-dlp] searching {search_query!r}")
     t = time.time()
 
     with yt_dlp.YoutubeDL(_YDL_OPTS_SEARCH) as ydl:
         info = ydl.extract_info(search_query, download=False)
-    logger.info(f"  [yt-dlp] resolved in {time.time() - t:.2f}s")
+    logger.debug(f"  [yt-dlp] resolved in {time.time() - t:.2f}s")
 
     entries = [e for e in info.get("entries", []) if e]
     scored_entries = [
         (_score_result(entry, query_lower), entry)
         for entry in entries
     ]
-    _log_candidate_scores(scored_entries)
     return scored_entries
 
 
@@ -358,7 +358,7 @@ def _select_playable_entry(
         resolved_entry = _resolve_playable_candidate(entry)
         if resolved_entry:
             return rank, score, entry, resolved_entry
-        logger.info(
+        logger.debug(
             "  [yt-dlp] skipped unplayable final_rank=%s score=%+d title=%r",
             rank,
             score,
@@ -431,12 +431,10 @@ def _dedupe_scored_entries(scored_entries: list[tuple[int, dict]]) -> list[tuple
 
 
 def _log_candidate_scores(scored_entries: list[tuple[int, dict]]):
-    ranked_entries = sorted(scored_entries, key=lambda item: item[0], reverse=True)
-    if ranked_entries:
-        logger.info("  [yt-dlp] candidates ranked high-to-low score for this search:")
+    ranked_entries = _dedupe_scored_entries(scored_entries)[:3]
     for rank, (score, entry) in enumerate(ranked_entries, start=1):
         logger.info(
-            "  [yt-dlp]   #%02d score=%+d title=%r uploader=%r",
+            "  [yt-dlp] candidate #%d score=%+d title=%r uploader=%r",
             rank,
             score,
             entry.get("title", "?"),
@@ -458,7 +456,7 @@ def _filter_excluded_entries(
     ]
     skipped = len(scored_entries) - len(filtered)
     if skipped:
-        logger.info(f"  [yt-dlp] skipped {skipped} previously failed candidate(s)")
+        logger.debug(f"  [yt-dlp] skipped {skipped} previously failed candidate(s)")
     return filtered
 
 
@@ -486,7 +484,7 @@ def _filter_weak_retry_entries(
 
     skipped = len(scored_entries) - len(filtered)
     if skipped:
-        logger.info(f"  [yt-dlp] skipped {skipped} weak retry candidate(s)")
+        logger.debug(f"  [yt-dlp] skipped {skipped} weak retry candidate(s)")
     return filtered
 
 def extract_playlist(url: str, requested_by: str) -> list[Track]:

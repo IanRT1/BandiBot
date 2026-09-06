@@ -101,3 +101,62 @@ def test_crypto_error_detection_matches_packet_decryption_errors():
     assert _is_crypto_error(RuntimeError("CryptoError decoding packet data"))
     assert _is_crypto_error(RuntimeError("failed to decrypt voice packet"))
     assert not _is_crypto_error(RuntimeError("audio buffer is empty"))
+
+
+def test_crypto_packet_log_filter_suppresses_individual_events_and_reports_burst(caplog):
+    import logging
+
+    from voice.listener import _CryptoPacketLogFilter
+
+    current_time = [0.0]
+    packet_filter = _CryptoPacketLogFilter(clock=lambda: current_time[0])
+    records = [
+        logging.LogRecord(
+            "discord.ext.voice_recv.reader",
+            logging.ERROR,
+            __file__,
+            1,
+            "CryptoError decoding packet data",
+            (),
+            None,
+        )
+        for _ in range(5)
+    ]
+
+    with caplog.at_level(logging.WARNING, logger="voice.listener"):
+        results = [packet_filter.filter(record) for record in records]
+
+    assert results == [False] * 5
+    warnings = [record for record in caplog.records if "packet decryption errors" in record.message]
+    assert len(warnings) == 1
+    assert "5 Discord voice packet decryption errors" in warnings[0].message
+
+
+def test_crypto_packet_log_filter_reports_again_after_quiet_window(caplog):
+    import logging
+
+    from voice.listener import _CryptoPacketLogFilter
+
+    current_time = [0.0]
+    packet_filter = _CryptoPacketLogFilter(clock=lambda: current_time[0])
+
+    def record():
+        return logging.LogRecord(
+            "discord.ext.voice_recv.reader",
+            logging.ERROR,
+            __file__,
+            1,
+            "CryptoError decoding packet data",
+            (),
+            None,
+        )
+
+    with caplog.at_level(logging.WARNING, logger="voice.listener"):
+        for _ in range(5):
+            packet_filter.filter(record())
+        current_time[0] = 11.0
+        for _ in range(5):
+            packet_filter.filter(record())
+
+    warnings = [record for record in caplog.records if "packet decryption errors" in record.message]
+    assert len(warnings) == 2

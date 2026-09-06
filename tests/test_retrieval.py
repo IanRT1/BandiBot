@@ -9,10 +9,58 @@ from bot.retrieval import (
     should_retrieve_lore,
 )
 from bot.tool_schemas import (
+    MUSIC_TOOLS,
+    VOICE_TOOLS,
+    WEB_SEARCH_TOOL,
+    select_tools_for_request,
     tools_without_context_lookups,
     tools_without_context_lookups_or_web_search,
     tools_without_web_search,
 )
+
+
+def _tool_names(tools):
+    return {tool["function"]["name"] for tool in tools}
+
+
+def test_tool_routing_uses_small_groups_for_obvious_requests():
+    assert select_tools_for_request("Play a song") == MUSIC_TOOLS
+    assert select_tools_for_request("unete al canal") == VOICE_TOOLS
+    assert select_tools_for_request("what is the weather today?") == WEB_SEARCH_TOOL
+    assert select_tools_for_request("hello") == []
+
+
+def test_tool_routing_preserves_lore_answers_without_tools():
+    assert select_tools_for_request(
+        "¿Quién es Poyo?",
+        lore_is_confident=True,
+    ) == []
+
+
+def test_tool_routing_combines_groups_for_mixed_intents():
+    names = _tool_names(
+        select_tools_for_request("Play music and tell me the weather today")
+    )
+
+    assert "play_music" in names
+    assert "web_search" in names
+
+
+def test_explicit_web_intent_survives_confident_lore_context():
+    names = _tool_names(
+        select_tools_for_request(
+            "¿Cuál es el clima hoy?",
+            lore_is_confident=True,
+        )
+    )
+
+    assert names == {"web_search"}
+
+
+def test_tool_routing_keeps_ambiguous_questions_safe():
+    names = _tool_names(select_tools_for_request("Can you help me?"))
+    assert "play_music" in names
+    assert "web_search" in names
 
 
 def test_retrieval_returns_only_relevant_server_lore():

@@ -43,9 +43,7 @@ from bot.utils import (
     get_server_info,
 )
 from bot.tool_schemas import (
-    ALL_TOOLS,
-    tools_without_context_lookups_or_web_search,
-    tools_without_web_search,
+    select_tools_for_request,
 )
 from bot.openai_client import send_to_openai
 from bot.tool_executor import execute_tool_call, is_music_tool
@@ -249,12 +247,11 @@ async def handle_bot_mention(message, client):
         ])
 
         t_llm = time.perf_counter()
-        if has_retrieved_lore:
-            available_tools = tools_without_context_lookups_or_web_search()
-        elif has_lore_context:
-            available_tools = tools_without_web_search()
-        else:
-            available_tools = ALL_TOOLS
+        available_tools = select_tools_for_request(
+            user_message,
+            lore_is_confident=has_retrieved_lore,
+            has_lore_context=has_lore_context,
+        )
 
         response_data = await send_to_openai(
             {"messages": messages, "temperature": 0.5},

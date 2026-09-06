@@ -107,7 +107,7 @@ class MixerSource(discord.AudioSource):
             self._cancelled = True
             self._tts_active = False
         self._tts_finished.set()
-        logger.info("[tts]  <- cancelled (wake word interrupt)")
+        logger.debug("[tts]  <- cancelled (wake word interrupt)")
 
     def reset_cancel(self):
         with self._lock:
@@ -143,7 +143,7 @@ class StandaloneSource(discord.AudioSource):
             self._done = True
             self._cancelled = True
         self._finished_evt.set()
-        logger.info("[tts]  <- standalone cancelled (wake word interrupt)")
+        logger.debug("[tts]  <- standalone cancelled (wake word interrupt)")
 
     def set_done(self):
         with self._lock:
@@ -163,7 +163,7 @@ class StandaloneSource(discord.AudioSource):
                     data = bytes(self._buf).ljust(DISCORD_FRAME_SIZE, b"\x00")
                     self._buf.clear()
                 else:
-                    logger.info("[tts]  -> standalone source exhausted, returning empty")
+                    logger.debug("[tts]  -> standalone source exhausted, returning empty")
                     return b""
             else:
                 return bytes(DISCORD_FRAME_SIZE)

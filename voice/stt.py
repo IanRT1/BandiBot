@@ -43,7 +43,7 @@ _OPTIONS = PrerecordedOptions(
 async def transcribe(wav_bytes: bytes) -> str:
     try:
         t = time.perf_counter()
-        logger.info(f"[stt]  → transcribing {len(wav_bytes) // 1000}KB")
+        logger.debug(f"[stt]  → transcribing {len(wav_bytes) // 1000}KB")
         payload = {"buffer": wav_bytes, "mimetype": "audio/wav"}
         response = await _client.listen.asyncprerecorded.v("1").transcribe_file(payload, _OPTIONS)
         alt = response.results.channels[0].alternatives[0]

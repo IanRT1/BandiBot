@@ -34,7 +34,7 @@ import logging
 
 import discord
 
-from bot.tool_schemas import ALL_TOOLS, tools_without_context_lookups
+from bot.tool_schemas import select_tools_for_request
 from bot.handlers import build_instruction
 from bot.retrieval import (
     format_retrieved_context,
@@ -54,9 +54,9 @@ _BACKGROUND_PLAYBACK_TASKS: set[asyncio.Task] = set()
 def _log_background_tool_result(task: asyncio.Task, tool_name: str):
     try:
         result = task.result()
-        logger.info(f"[voice] background {tool_name} completed after interrupt: {result}")
+        logger.debug(f"[voice] background {tool_name} completed after interrupt: {result}")
     except asyncio.CancelledError:
-        logger.info(f"[voice] background {tool_name} was cancelled")
+        logger.debug(f"[voice] background {tool_name} was cancelled")
     except Exception as e:
         logger.error(f"[voice] background {tool_name} failed after interrupt: {e}")
     finally:
@@ -71,7 +71,7 @@ async def _execute_playback_tool(tool_call, proxy):
     try:
         return await asyncio.shield(task)
     except asyncio.CancelledError:
-        logger.info(f"[voice] {tool_name} continuing in background after interrupt")
+        logger.debug(f"[voice] {tool_name} continuing in background after interrupt")
         task.add_done_callback(lambda t: _log_background_tool_result(t, tool_name))
         raise
     finally:
@@ -196,7 +196,13 @@ async def handle_voice_command(
         server_name=guild.name,
     )
 
+    t_context = time.perf_counter()
     context_info, has_retrieved_lore = _build_voice_context(member, guild, text)
+    logger.debug(
+        "[voice] context prepared in %.0fms | lore=%s",
+        (time.perf_counter() - t_context) * 1000,
+        "yes" if has_retrieved_lore else "no",
+    )
 
     messages = [
         {"role": "system", "content": instruction},
@@ -228,9 +234,20 @@ async def handle_voice_command(
     messages.append({"role": "system", "content": "━━━ CURRENT COMMAND BELOW — ACT ON THIS ONLY ━━━"})
     messages.append({"role": "user", "content": f"[{user_name}] {text}"})
 
+    t_llm = time.perf_counter()
+    available_tools = select_tools_for_request(
+        text,
+        lore_is_confident=has_retrieved_lore,
+        has_lore_context=has_retrieved_lore,
+    )
     response_data = await send_to_openai(
         {"messages": messages, "temperature": 0.5},
-        tools=tools_without_context_lookups() if has_retrieved_lore else ALL_TOOLS,
+        tools=available_tools,
+    )
+    logger.debug(
+        "[voice] first LLM call completed in %.0fms | result=%s",
+        (time.perf_counter() - t_llm) * 1000,
+        "ok" if response_data else "failed",
     )
 
     if not response_data:
@@ -263,12 +280,18 @@ async def handle_voice_command(
         })
 
         for tc in tool_calls:
+            t_tool = time.perf_counter()
             if is_music_tool(tc["name"]):
                 result = await _execute_playback_tool(tc, proxy)
             elif tc["name"] == "web_search":
                 result = await _execute_web_search_tool(tc, proxy, text)
             else:
                 result = await execute_tool_call(tc, proxy)
+            logger.debug(
+                "[voice] tool %s completed in %.0fms",
+                tc["name"],
+                (time.perf_counter() - t_tool) * 1000,
+            )
             messages.append({
                 "role": "tool",
                 "tool_call_id": tc["id"],
@@ -281,8 +304,14 @@ async def handle_voice_command(
             logger.info(f"[llm]  ← {', '.join(tool_names)} ({elapsed:.0f}ms) | no TTS")
             return "", False
 
+        t_followup = time.perf_counter()
         response_data = await send_to_openai(
             {"messages": messages, "temperature": 0.5},
+        )
+        logger.debug(
+            "[voice] follow-up LLM call completed in %.0fms | result=%s",
+            (time.perf_counter() - t_followup) * 1000,
+            "ok" if response_data else "failed",
         )
 
         if not response_data:
@@ -296,8 +325,8 @@ async def handle_voice_command(
     if len(preview) > 160:
         preview = preview[:159] + "…"
     logger.info(
-        "[voice] response ready | %.0fms | speaking %d chars | response=%s",
-        elapsed, len(response_text), preview,
+        "[voice] response ready | %.0fms | response=%s",
+        elapsed, preview,
     )
 
     return response_text, should_leave

@@ -270,16 +270,16 @@ class GuildPlayer:
                     break
 
             if not next_unresolved:
-                logger.info("[music] resolver: nothing to resolve, stopping")
+                logger.debug("[music] resolver: nothing to resolve, stopping")
                 return
 
-            logger.info(f"[music] resolver: pre-resolving {next_unresolved.title!r}")
+            logger.debug(f"[music] resolver: pre-resolving {next_unresolved.title!r}")
             try:
                 resolved = await _resolve_track_async(
                     next_unresolved.query, next_unresolved.requested_by
                 )
                 _copy_resolved_track(next_unresolved, resolved)
-                logger.info(f"[music] resolver: resolved → {resolved.title!r}")
+                logger.debug(f"[music] resolver: resolved → {resolved.title!r}")
             except Exception as e:
                 next_unresolved.resolved = True
                 next_unresolved.error = str(e)
@@ -523,7 +523,7 @@ class GuildPlayer:
                 self._schedule_start_when_free()
             return
 
-        logger.info(
+        logger.debug(
             f"[music] play() called | "
             f"is_playing={self.voice_client.is_playing()} "
             f"is_connected={self.voice_client.is_connected()}"
@@ -574,6 +574,17 @@ class VoiceManager:
             self._players[guild.id] = GuildPlayer(guild)
         return self._players[guild.id]
 
+    async def shutdown(self):
+        """Disconnect every guild player and clear runtime playback state."""
+        players = list(self._players.values())
+        for player in players:
+            try:
+                await player.disconnect()
+            except Exception as exc:
+                logger.error("[music] shutdown cleanup failed for %s: %s", player.guild.name, exc)
+        self._players.clear()
+        self._play_locks.clear()
+
     def _get_play_lock(self, guild_id: int) -> asyncio.Lock:
         if guild_id not in self._play_locks:
             self._play_locks[guild_id] = asyncio.Lock()
@@ -603,6 +614,7 @@ class VoiceManager:
                 return f"Now playing: {track.title}"
             else:
                 position = len(player.queue)
+                logger.info("[music] queued position=%d: %s", position, track.title)
                 return f"Queued at position {position}: {track.title}"
 
     async def queue_bulk(self, guild, requester_member, queries: list[str], text_channel=None) -> str:
@@ -795,7 +807,7 @@ class VoiceManager:
 
 
 async def _post_now_playing_for_track(player, track):
-    logger.info(f"[music] posting now playing for {track.title!r}")
+    logger.debug(f"[music] posting now playing for {track.title!r}")
     if not player.text_channel:
         logger.warning("[music] text_channel is None — cannot post now playing")
         return

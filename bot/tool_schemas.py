@@ -12,6 +12,8 @@ Boundary:
   state, touch the music queue, or execute tool side effects.
 """
 
+import re
+
 MUSIC_TOOLS = [
     {
         "type": "function",
@@ -297,6 +299,93 @@ WEB_SEARCH_TOOL = [
 ]
 
 ALL_TOOLS = MUSIC_TOOLS + GET_MEMBER_ACTIVITY_TOOL + GET_SERVER_INFO_TOOL + WEB_SEARCH_TOOL
+
+VOICE_TOOLS = [
+    tool for tool in MUSIC_TOOLS
+    if tool["function"]["name"] in {"join_voice", "leave_voice"}
+]
+
+_MUSIC_REQUEST_RE = re.compile(
+    r"\b(play|queue|add|put\s+on|skip|next|pause|resume|stop|"
+    r"pon|ponme|reproduce|toca|salta|siguiente|pausa|reanuda|deten)\b",
+    re.IGNORECASE,
+)
+_VOICE_REQUEST_RE = re.compile(
+    r"\b(join|enter|come|leave|disconnect|unete|únete|entra|ven|sal|salte|"
+    r"desconecta)\b",
+    re.IGNORECASE,
+)
+_WEB_REQUEST_RE = re.compile(
+    r"\b(weather|clima|news|noticias|price|precio|schedule|horario|"
+    r"current|actual|today|hoy|search|busca|buscar)\b",
+    re.IGNORECASE,
+)
+_MEMBER_ACTIVITY_RE = re.compile(
+    r"\b(online|activo|activos|connected|conectado|jugando|playing|"
+    r"voice|conectados|roles|permisos)\b",
+    re.IGNORECASE,
+)
+_QUESTION_RE = re.compile(
+    r"\b(who|what|when|where|why|how|quien|quién|que|qué|cuando|"
+    r"cuándo|donde|dónde|como|cómo|who's|whats)\b|[?¿]",
+    re.IGNORECASE,
+)
+
+
+def select_tools_for_request(
+    request: str,
+    *,
+    lore_is_confident: bool = False,
+    has_lore_context: bool = False,
+):
+    """Choose the smallest safe tool set using local, deterministic signals.
+
+    Ambiguous requests deliberately retain the broader tool set so routing
+    reliability is preserved. This function never calls a model or a service.
+    """
+    text = request or ""
+    lowered = text.casefold().strip()
+
+    has_music_intent = bool(_MUSIC_REQUEST_RE.search(lowered))
+    has_voice_intent = bool(_VOICE_REQUEST_RE.search(lowered))
+    has_web_intent = bool(_WEB_REQUEST_RE.search(lowered))
+    has_member_intent = bool(_MEMBER_ACTIVITY_RE.search(lowered))
+
+    if lore_is_confident and not any(
+        (has_music_intent, has_voice_intent, has_web_intent, has_member_intent)
+    ):
+        return []
+
+    selected_groups = []
+    if has_music_intent:
+        selected_groups.append(MUSIC_TOOLS)
+    if has_voice_intent:
+        selected_groups.append(VOICE_TOOLS)
+    if has_web_intent:
+        selected_groups.append(WEB_SEARCH_TOOL)
+    if has_member_intent:
+        selected_groups.append(GET_MEMBER_ACTIVITY_TOOL)
+
+    if selected_groups:
+        selected_names = {
+            tool["function"]["name"]
+            for group in selected_groups
+            for tool in group
+        }
+        return [
+            tool for tool in ALL_TOOLS
+            if tool["function"]["name"] in selected_names
+        ]
+
+    # Short non-question messages are conversational and do not need tool
+    # schemas. Questions remain broad when no safe local route is obvious.
+    if len(lowered.split()) <= 3 and not _QUESTION_RE.search(lowered):
+        return []
+
+    if has_lore_context and not has_web_intent:
+        return tools_without_web_search()
+
+    return ALL_TOOLS
 
 
 def tools_without_server_info():

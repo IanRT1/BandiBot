@@ -58,6 +58,45 @@ logger = logging.getLogger(__name__)
 warnings.filterwarnings("ignore", message=".*tflite runtime.*")
 
 
+class _CryptoPacketLogFilter(logging.Filter):
+    """Collapse Discord voice crypto packet errors into one burst warning."""
+
+    MESSAGE = "CryptoError decoding packet data"
+    WINDOW_SECONDS = 10.0
+    BURST_THRESHOLD = 5
+
+    def __init__(self, clock=time.monotonic):
+        super().__init__()
+        self._clock = clock
+        self._events: deque[float] = deque()
+        self._reported = False
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.getMessage() != self.MESSAGE:
+            return True
+
+        now = self._clock()
+        had_events = bool(self._events)
+        while self._events and self._events[0] <= now - self.WINDOW_SECONDS:
+            self._events.popleft()
+        if had_events and not self._events:
+            self._reported = False
+        self._events.append(now)
+
+        if len(self._events) >= self.BURST_THRESHOLD and not self._reported:
+            logger.warning(
+                "[voice] %d Discord voice packet decryption errors in %.0fs; "
+                "possible voice connection instability",
+                len(self._events),
+                self.WINDOW_SECONDS,
+            )
+            self._reported = True
+        return False
+
+
+logging.getLogger("discord.ext.voice_recv.reader").addFilter(_CryptoPacketLogFilter())
+
+
 def _is_crypto_error(error: Exception) -> bool:
     message = str(error).lower()
     return "crypto" in message or "decrypt" in message or "cryptoerror" in message
@@ -376,7 +415,7 @@ class BandiBotSink(voice_recv.AudioSink):
                         self._oww_buf[uid] = np.array([], dtype=np.int16)
                         self._score_buf[uid].clear()
                         oww.reset()
-                        logger.info(
+                        logger.debug(
                             f"[voice] ── ignored duplicate wake word for {user.display_name}; command already processing ──"
                         )
                         break
@@ -384,7 +423,7 @@ class BandiBotSink(voice_recv.AudioSink):
                     processing_interrupt = True
                     u.interrupted = True
                     self.gs._interrupted_pipeline_uids.add(uid)
-                    logger.info(
+                    logger.debug(
                         "[voice] interrupting current TTS for a repeated wake word"
                     )
                     asyncio.run_coroutine_threadsafe(
@@ -407,7 +446,7 @@ class BandiBotSink(voice_recv.AudioSink):
                     if prev_u.state not in ("idle",):
                         prev_u.interrupted = True
                         self.gs._interrupted_pipeline_uids.add(prev_uid)
-                        logger.info("[voice] interrupting current response for a new wake word")
+                        logger.debug("[voice] interrupting current response for a new wake word")
                         asyncio.run_coroutine_threadsafe(
                             self.gs._interrupt_current(), self.gs.loop
                         )
@@ -442,7 +481,7 @@ class BandiBotSink(voice_recv.AudioSink):
             if vad_score >= VAD_SPEECH_THRESHOLD:
                 if not u.heard_speech:
                     elapsed = time.time() - u.start_time
-                    logger.info(f"[vad]  → first speech detected (score={vad_score:.2f}, {elapsed:.1f}s after activation)")
+                    logger.debug(f"[vad]  → first speech detected (score={vad_score:.2f}, {elapsed:.1f}s after activation)")
                 u.heard_speech = True
                 u.speech_chunks += 1
                 u.total_speech_chunks += 1
@@ -468,7 +507,7 @@ class BandiBotSink(voice_recv.AudioSink):
             self._reset_user(uid)
             return
 
-        logger.info(f"[voice] ← captured {duration:.2f}s | {u.total_speech_chunks} speech chunks | sending to STT")
+        logger.debug(f"[voice] ← captured {duration:.2f}s | {u.total_speech_chunks} speech chunks | sending to STT")
         wav = samples_to_wav_bytes(all_samples, SOURCE_SAMPLE_RATE)
         #with open("debug_capture.wav", "wb") as f:
         #    f.write(wav)
@@ -484,7 +523,7 @@ class BandiBotSink(voice_recv.AudioSink):
             self._active_uid = None
         self.gs._vad_model.reset_states()
         if was_state != "idle":
-            logger.info(f"[voice] → listening for wake word | sink_active={self.gs._voice_client is not None and self.gs._voice_client.is_connected()}")
+            logger.debug(f"[voice] → listening for wake word | sink_active={self.gs._voice_client is not None and self.gs._voice_client.is_connected()}")
 
     def set_listening(self, uid: int):
         u   = self._get_user(uid)
@@ -501,7 +540,7 @@ class BandiBotSink(voice_recv.AudioSink):
         u.vad_grace_until     = now + VAD_GRACE_PERIOD
         u.interrupted         = False
         self.gs._vad_model.reset_states()
-        logger.info(f"[vad]  → grace period {VAD_GRACE_PERIOD:.1f}s, then waiting for speech (timeout {SPEECH_START_TIMEOUT:.0f}s)")
+        logger.debug(f"[vad]  → grace period {VAD_GRACE_PERIOD:.1f}s, then waiting for speech (timeout {SPEECH_START_TIMEOUT:.0f}s)")
 
     def cleanup(self):
         pass
@@ -689,7 +728,7 @@ class GuildVoiceSession:
         from voice.tts import play_activation, cancel_tts
         self.bump_activity()
         cancel_tts(self._voice_client)
-        logger.info("[voice] listening for command")
+        logger.debug("[voice] listening for command")
         try:
             asyncio.create_task(play_activation(self._voice_client))
         except Exception as e:
@@ -741,7 +780,7 @@ class GuildVoiceSession:
 
                 if since_last_speech >= SPEECH_SILENCE_TIME:
                     total_duration = sum(len(s) for s in u.audio_buf) / SOURCE_SAMPLE_RATE
-                    logger.info(
+                    logger.debug(
                         f"[vad]  ← {since_last_speech:.1f}s silence | "
                         f"{u.total_speech_chunks} speech chunks | "
                         f"{total_duration:.2f}s captured"
@@ -768,7 +807,7 @@ class GuildVoiceSession:
         if self.sink:
             u = self.sink._get_user(uid)
             if u.interrupted:
-                logger.info(f"[voice] ✗ pipeline cancelled before STT — user was interrupted")
+                logger.debug(f"[voice] ✗ pipeline cancelled before STT — user was interrupted")
                 u.reset()
                 return
 
@@ -798,7 +837,7 @@ class GuildVoiceSession:
                     self.sink._get_user(uid).reset()
                     return
 
-                logger.info("[voice] transcription received (%d chars)", len(text))
+                logger.debug("[voice] transcription received (%d chars)", len(text))
                 session.add("user", text)
                 t = time.perf_counter()
                 likely_playback = _looks_like_playback_command(text)
@@ -869,7 +908,7 @@ class GuildVoiceSession:
                         self._voice_client = None
                         self.sink = None
                 else:
-                    logger.info(f"[llm]  ← {elapsed:.0f}ms | no TTS (music command)")
+                    logger.debug(f"[voice] music command pipeline completed in {elapsed:.0f}ms | no TTS")
 
             except asyncio.CancelledError:
                 logger.info("[voice] ✗ pipeline task cancelled")
@@ -926,6 +965,16 @@ class VoiceListenerManager:
         session = self._sessions.pop(guild.id, None)
         if session:
             await session.stop()
+
+    async def shutdown(self):
+        """Stop all active voice listener sessions during process shutdown."""
+        sessions = list(self._sessions.items())
+        self._sessions.clear()
+        for guild_id, session in sessions:
+            try:
+                await session.stop()
+            except Exception as exc:
+                logger.error("[voice] shutdown cleanup failed for guild %s: %s", guild_id, exc)
 
 
 def notify_music_activity(guild: discord.Guild):
