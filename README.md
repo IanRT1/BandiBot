@@ -39,9 +39,10 @@ Every instance is independently hosted by the user. There is no central server, 
 - **Automatic TTS fallback** — if a remote provider fails before producing audio, the response automatically falls back to local Kokoro
 - **Mid-speech interruption** — trigger the wake word while the bot is speaking to immediately cancel and start a new command
 - **Per-user isolation** — only the user who triggered the wake word has their audio captured; other speakers are ignored
-- **Voice music feedback** — voice-detected song requests post the heard query first, then replace that same message with the final queued or now-playing result
+- **Voice music feedback** — voice-detected song requests post the heard query first, then edit it when queued or remove it when playback starts and the Now Playing UI takes over
+- **Minimal voice acknowledgements** — song requests use a short English or Spanish playing/queued confirmation instead of narrating the search process
 - **Timeout recovery** — STT, voice-command, and TTS stages have independent timeouts and reset processing state when a provider hangs
-- **Clean voice lifecycle** — failed or timed-out commands release their pipeline state so later wake-word requests are not permanently blocked
+- **Clean voice lifecycle** — failed or timed-out commands release their pipeline state so later wake-word requests are not permanently blocked; listener start/stop operations are serialized to prevent duplicate voice sessions
 
 ### Music
 - **YouTube playback** via yt-dlp and FFmpeg with loudness normalization
@@ -52,6 +53,7 @@ Every instance is independently hosted by the user. There is no central server, 
 - **Bulk song queuing** — multiple songs or YouTube playlist URLs queued instantly as placeholders, resolved one track ahead in the background as songs play
 - **Graceful error handling** — unresolvable tracks are skipped with a notification at playback time
 - **Playback race recovery** — tracks that finish resolving while activation/TTS audio is playing wait safely instead of causing Discord's `Already playing audio` error; failed starts restore the track to the queue
+- **Stream URL refresh** — stale signed YouTube stream URLs are refreshed from the existing video URL before playback, avoiding a second search/ranking pass; playback failures can still search for an alternative result
 - **Now Playing embed** with live timer, album art banner, next track preview, and interactive button controls (previous, play/pause, skip, stop, queue, loop, shuffle, copy link)
 
 ### Text Commands
@@ -75,7 +77,7 @@ Every instance is independently hosted by the user. There is no central server, 
 - **Quiet startup logging** — normal connection attempts are implicit; retry attempts are logged only after a connection failure
 - **Private deployment context** — personal instructions and server lore stay local and are excluded from Git
 - **Generic tracked templates** — new deployments can use safe `*.example.txt` files without exposing server-specific information
-- **Offline automated tests** for RAG, music intent routing, voice timeout recovery, TTS fallback, tool errors, and repository hygiene
+- **Offline automated tests** for RAG, music intent routing, voice timeout recovery, TTS fallback, tool errors, voice lifecycle cleanup, acknowledgement language, and repository hygiene
 
 ---
 
@@ -100,11 +102,11 @@ Discord Gateway
                           │         ├── Wake word detection (openWakeWord)
                           │         └── VAD (Silero)
                           ├── voice/stt.py (Deepgram Nova-3)
-                          ├── voice/handler.py (LLM + tool calls)
-                          └── voice/tts.py (TTS orchestration)
-                                    ├── voice/tts_providers.py (Kokoro / Deepgram / ElevenLabs registry)
-                                    ├── voice/tts_sources.py (MixerSource / StandaloneSource)
-                                    └── music/player.py (FFmpeg → MixerSource → Discord)
+                           ├── voice/handler.py (LLM + tool calls)
+                           └── voice/tts.py (TTS orchestration)
+                                     ├── voice/tts_providers.py (Kokoro / Deepgram / ElevenLabs registry)
+                                     ├── voice/tts_sources.py (MixerSource / StandaloneSource)
+                                     └── music/player.py (FFmpeg → MixerSource → Discord)
 ```
 
 ### Key Design Decisions
@@ -117,7 +119,7 @@ Discord Gateway
 
 **Per-user state machines** — each user in the voice channel has independent wake word detection, VAD state, and capture buffers. Packet loss or bad audio from one user does not affect others.
 
-**Music starts voice listening** — when a text command makes the bot join voice for music playback, `music/player.py` explicitly starts the wake-word listener on the same voice client. The Discord voice-state event also starts listening, and the listener manager de-duplicates repeated starts.
+**Music starts voice listening** — when a text command makes the bot join voice for music playback, `music/player.py` explicitly starts the wake-word listener on the same voice client. The Discord voice-state event remains a fallback for joins that did not originate in the command path, while the listener manager serializes lifecycle operations and avoids competing sessions.
 
 **Playback state recovery** — resolver callbacks re-check whether Discord is
 already playing standalone activation/TTS audio. If a playback start is
@@ -157,6 +159,10 @@ an upcoming queue item, including Spanish phrasing such as `quitar la canción`.
 **Voice receive recovery** — bursts of Discord crypto/decryption failures are
 grouped into one warning and trigger a receive-sink restart, while unrelated
 voice processing errors remain visible individually.
+
+**Structured music outcomes** — `music/results.py` represents play success,
+queueing, startup, and failure as structured data. Text and voice confirmations
+therefore use the actual playback result instead of parsing display strings.
 
 ---
 
@@ -267,6 +273,10 @@ Put your `BandiBot.onnx` wake word model file in the `assets/` directory. See [W
 bandibot
 ```
 
+The `bandibot` console command is provided by the editable package install.
+Stop any older BandiBot process before restarting so two Discord voice sessions
+cannot compete for the same bot account.
+
 ---
 
 ## Configuration
@@ -276,6 +286,7 @@ Create a `.env` file in the root directory with the following variables:
 ```env
 DISCORD_TOKEN=your_discord_bot_token
 OPENAI_API_KEY=your_openai_api_key
+OPENAI_MODEL=gpt-5.6-luna
 DEEPGRAM_API_KEY=your_deepgram_api_key
 GEMINI_API_KEY=your_gemini_api_key
 
@@ -292,6 +303,10 @@ LOG_SENSITIVE_CONTENT=1
 ```
 
 `TTS_PROVIDER` supports `kokoro`, `deepgram`, and `elevenlabs`. Provider changes take effect after restarting the bot. `GEMINI_SEARCH_MODEL` is fixed in `core/config.py` and is not a secret.
+
+The voice assistant currently constrains generated spoken acknowledgements to
+English or Spanish based on the recognized command. STT itself defaults to
+Deepgram's multilingual `multi` mode and can handle code-switching.
 
 YouTube challenge solving is configured centrally in `core/config.py` with Node
 and the `ejs:github` remote component source. Node 22+ must be installed and
@@ -341,7 +356,9 @@ Discord's Opus codec introduces audio degradation compared to a direct microphon
 BandiBot/
 ├── core/
 │   ├── client.py           # Discord client, event routing, reconnection logic
-│   └── config.py           # Centralized environment variable loading
+│   ├── config.py           # Centralized environment variable loading
+│   ├── interaction_logging.py # Interaction timing, privacy, and usage logs
+│   └── preflight.py         # Startup dependency and asset validation
 │
 ├── voice/
 │   ├── listener.py         # Wake word, VAD, STT, TTS pipeline per guild
@@ -357,6 +374,7 @@ BandiBot/
 │   ├── player.py           # Music queue, guild playback state, FFmpeg playback
 │   ├── resolver.py         # yt-dlp search, URL resolution, playlist extraction
 │   ├── tracks.py           # Shared Track model
+│   ├── results.py           # Structured play/queue/failure outcomes
 │   ├── attachments.py      # Uploaded audio ingestion and metadata extraction
 │   ├── now_playing.py      # Now Playing embed, button controls, live timer
 │   └── banner.py           # Banner image generation (thumbnail + text overlay)
@@ -382,11 +400,15 @@ BandiBot/
 │   ├── test_retrieval.py           # Local RAG and lore fallback tests
 │   ├── test_music_tools.py         # Music intent and tool safety tests
 │   ├── test_music_player.py        # Playback race and queue restoration tests
+│   ├── test_interaction_logging.py # Privacy and usage logging tests
+│   ├── test_preflight.py            # Startup validation tests
+│   ├── test_runtime_shutdown.py     # Voice/music cleanup tests
+│   ├── test_search_acknowledgement.py # Voice search/playing acknowledgements
 │   ├── test_tts.py                 # TTS providers, conversion, and fallback
 │   ├── test_voice_timeouts.py      # STT/LLM timeout state recovery
 │   └── test_repository_hygiene.py  # Private files and cache ignore rules
 │
-├── __main__.py             # Package entry point
+├── __main__.py             # Direct module entry point
 ├── pyproject.toml          # Package config, bandibot CLI entry point
 ├── requirements.txt        # Python dependencies
 ├── .env.example            # Environment variable template
@@ -418,18 +440,24 @@ The tests cover:
 - TTS provider registration, PCM conversion, error parsing, automatic
   ElevenLabs-to-Kokoro fallback, and prevention of repeated speech after a
   partial provider stream
-- Runtime voice/music shutdown cleanup and failure isolation
+- Runtime voice/music shutdown cleanup, listener lifecycle serialization, and
+  failure isolation
+- Voice search acknowledgement overlap, English/Spanish routing, and
+  cancellation behavior
 - Private context separation and ignored test-cache directories
 
-The suite currently contains 54 tests. The only expected warning is Python's
+The suite currently contains 101 tests. The only expected warning is Python's
 `audioop` deprecation warning from the Discord dependency.
 
-GitHub Actions runs the same test suite and a Python compilation check on every
-push to `master` and every pull request targeting `master`. CI currently uses
-Python 3.11 because it has the broadest wheel support for the wake-word, audio,
-and Kokoro dependencies. Python 3.14 is not supported yet because the current
-Kokoro 0.9.x requirement does not publish compatible packages for it. CI uses
-placeholder configuration values only; no production secrets are required.
+For a local syntax check, compile the edited modules with:
+
+```powershell
+python -m py_compile core/client.py music/player.py voice/handler.py voice/listener.py
+```
+
+The test suite sets placeholder API keys and disables semantic embeddings, so
+it does not require production secrets, private context files, network access,
+or model downloads.
 
 ---
 
