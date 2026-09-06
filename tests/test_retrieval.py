@@ -76,6 +76,8 @@ def test_warm_retrieval_encode_failure_preserves_lexical_fallback(monkeypatch):
 
 def test_tool_routing_uses_small_groups_for_obvious_requests():
     assert select_tools_for_request("Play a song") == MUSIC_TOOLS
+    assert select_tools_for_request("Delete position one") == MUSIC_TOOLS
+    assert select_tools_for_request("canción equivocada") == MUSIC_TOOLS
     assert select_tools_for_request("unete al canal") == VOICE_TOOLS
     assert select_tools_for_request("what is the weather today?") == WEB_SEARCH_TOOL
     assert select_tools_for_request("hello") == []

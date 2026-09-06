@@ -113,6 +113,20 @@ MUSIC_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "undo_last_song_request",
+            "description": (
+                "Undo the most recent song request when the user says the wrong song was selected, "
+                "they did not mean to play that song, or asks to remove the song just requested. "
+                "Remove only the latest requested song, not an older queue item. "
+                "Examples include 'wrong song', 'not that one', 'canción equivocada', and "
+                "'no quería poner esa'."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "delete_track",
             "description": (
                 "Remove one or more songs from the queue without affecting playback. "
@@ -306,8 +320,14 @@ VOICE_TOOLS = [
 ]
 
 _MUSIC_REQUEST_RE = re.compile(
-    r"\b(play|queue|add|put\s+on|skip|next|pause|resume|stop|"
-    r"pon|ponme|reproduce|toca|salta|siguiente|pausa|reanuda|deten)\b",
+    r"\b(play|queue|add|put\s+on|skip|next|pause|resume|stop|delete|remove|move|clear|"
+    r"pon|ponme|reproduce|toca|salta|siguiente|pausa|reanuda|deten|quita|quitar|borra|mueve)\b",
+    re.IGNORECASE,
+)
+_UNDO_REQUEST_RE = re.compile(
+    r"\b(?:wrong\s+(?:song|track)|not\s+(?:that|this)\s+(?:one|song|track)|"
+    r"(?:didn['’]t|did not)\s+want\s+(?:that|this)|"
+    r"canci[oó]n\s+equivocada|no\s+quer[ií]a\s+(?:poner|esa)|no\s+era\s+esa)\b",
     re.IGNORECASE,
 )
 _VOICE_REQUEST_RE = re.compile(
@@ -352,13 +372,17 @@ def select_tools_for_request(
         names = {tool["function"]["name"] for tool in selected}
         required = list(WEB_SEARCH_TOOL) if allow_live_search else []
         if allow_song_requests:
-            required.extend(tool for tool in MUSIC_TOOLS if tool["function"]["name"] == "play_music")
+            required.extend(
+                tool for tool in MUSIC_TOOLS
+                if tool["function"]["name"] in {"play_music", "undo_last_song_request"}
+            )
         return selected + [tool for tool in required if tool["function"]["name"] not in names]
 
     text = request or ""
     lowered = text.casefold().strip()
 
     has_music_intent = bool(_MUSIC_REQUEST_RE.search(lowered))
+    has_undo_intent = bool(_UNDO_REQUEST_RE.search(lowered))
     has_voice_intent = bool(_VOICE_REQUEST_RE.search(lowered))
     has_web_intent = bool(_WEB_REQUEST_RE.search(lowered))
     has_member_intent = bool(_MEMBER_ACTIVITY_RE.search(lowered))
@@ -369,7 +393,7 @@ def select_tools_for_request(
         return []
 
     selected_groups = []
-    if has_music_intent:
+    if has_music_intent or has_undo_intent:
         selected_groups.append(MUSIC_TOOLS)
     if has_voice_intent:
         selected_groups.append(VOICE_TOOLS)

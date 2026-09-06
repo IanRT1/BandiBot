@@ -54,6 +54,7 @@ _YOUTUBE_VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 _MIN_RETRY_QUERY_TOKEN_MATCH = 0.6
 _MAX_RESOLVE_CANDIDATES = 4
 _MISSING_QUERY_TOKEN_PENALTY = 10
+_MIN_RELEVANT_QUERY_RATIO = 0.5
 _LOGGED_YTDLP_CONFIG = False
 _QUERY_FILLER_TOKENS = {
     "by", "ft", "feat", "featuring", "with", "and", "the", "a", "an",
@@ -257,6 +258,10 @@ def resolve_track(
         if retry_scored_entries:
             candidate_entries.extend(retry_scored_entries)
 
+    candidate_entries = _filter_irrelevant_entries(candidate_entries, query_lower)
+    if not candidate_entries:
+        raise Exception("No sufficiently relevant playable results found.")
+
     _log_candidate_scores(candidate_entries)
 
     (
@@ -265,7 +270,7 @@ def resolve_track(
         winner_candidate,
         best,
     ) = _select_playable_entry(candidate_entries)
-    logger.info(
+    logger.debug(
         "  [yt-dlp] winner final_rank=%s score=%+d title=%r uploader=%r",
         winner_rank,
         winner_score,
@@ -314,7 +319,7 @@ def _resolve_direct_url(url: str, requested_by: str) -> Track:
     info = _resolve_playable_url(url)
     logger.debug(f"  [yt-dlp] resolved in {time.time() - t:.2f}s")
 
-    logger.info(f"  [yt-dlp] winner title={info.get('title', '?')!r}")
+    logger.debug(f"  [yt-dlp] winner title={info.get('title', '?')!r}")
     return Track(
         title=info.get("title", "Unknown title"),
         stream_url=info["url"],
@@ -435,7 +440,7 @@ def _dedupe_scored_entries(scored_entries: list[tuple[int, dict]]) -> list[tuple
 def _log_candidate_scores(scored_entries: list[tuple[int, dict]]):
     ranked_entries = _dedupe_scored_entries(scored_entries)[:3]
     for rank, (score, entry) in enumerate(ranked_entries, start=1):
-        logger.info(
+        logger.debug(
             "  [yt-dlp] candidate #%d score=%+d title=%r uploader=%r",
             rank,
             score,
@@ -487,6 +492,37 @@ def _filter_weak_retry_entries(
     skipped = len(scored_entries) - len(filtered)
     if skipped:
         logger.debug(f"  [yt-dlp] skipped {skipped} weak retry candidate(s)")
+    return filtered
+
+
+def _filter_irrelevant_entries(
+    scored_entries: list[tuple[int, dict]],
+    query_lower: str,
+) -> list[tuple[int, dict]]:
+    """Reject playable results that match too little of a multi-word request."""
+    query_tokens = {
+        token for token in _tokens(query_lower)
+        if token not in _QUERY_FILLER_TOKENS and len(token) > 2
+    }
+    if len(query_tokens) < 2:
+        return scored_entries
+
+    filtered = []
+    for score, entry in scored_entries:
+        candidate_tokens = set(_tokens(
+            f"{entry.get('title') or ''} "
+            f"{entry.get('uploader') or entry.get('channel') or ''}"
+        ))
+        match_ratio = len(query_tokens & candidate_tokens) / len(query_tokens)
+        if match_ratio >= _MIN_RELEVANT_QUERY_RATIO:
+            filtered.append((score, entry))
+        else:
+            logger.debug(
+                "  [yt-dlp] rejected low-relevance candidate ratio=%.2f title=%r uploader=%r",
+                match_ratio,
+                entry.get("title", "?"),
+                entry.get("uploader") or entry.get("channel") or "?",
+            )
     return filtered
 
 def extract_playlist(url: str, requested_by: str) -> list[Track]:
@@ -650,6 +686,31 @@ def _score_result(entry: dict, query_lower: str) -> int:
         score += 4
     if "official" in uploader or "oficial" in uploader:
         score += 3
+
+    # Artist channels often compact the artist name into values such as
+    # "ModjoOfficial". Reward that authority signal when the same name also
+    # appears in the candidate title, without boosting unrelated reuploads.
+    authoritative_uploader = (
+        "official" in uploader
+        or "oficial" in uploader
+        or " - topic" in uploader
+        or "vevo" in uploader
+    )
+    if (
+        authoritative_uploader
+        and any(
+            len(word) >= 4 and word in uploader
+            for word in title_words
+            if word not in _QUERY_FILLER_TOKENS
+        )
+    ):
+        score += 8
+
+    # For ordinary playback, an official lyric upload is preferable to an
+    # official music video because it usually provides a cleaner audio-first
+    # stream. The bonus is limited to authoritative uploaders.
+    if authoritative_uploader and _contains_phrase(title, "lyric"):
+        score += 6
 
     requested_variants = {
         variant for variant in _REQUESTABLE_VARIANTS

@@ -253,7 +253,7 @@ class GuildPlayer:
                 logger.error(f"[now_playing] failed to delete playback UI during disconnect: {e}")
 
         if messages:
-            logger.info("[now_playing] cleared playback UI during disconnect")
+            logger.debug("[now_playing] cleared playback UI during disconnect")
 
         if view:
             view.message = None
@@ -583,7 +583,7 @@ class GuildPlayer:
     def _schedule_idle_check(self):
         if self._idle_task:
             self._idle_task.cancel()
-        logger.info(f"[music] idle check scheduled in {_IDLE_TIMEOUT}s")
+        logger.debug(f"[music] idle check scheduled in {_IDLE_TIMEOUT}s")
         self._idle_task = asyncio.create_task(self._idle_disconnect())
 
     async def _idle_disconnect(self):

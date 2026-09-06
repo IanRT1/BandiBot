@@ -72,6 +72,60 @@ def test_resolver_penalizes_live_unless_requested():
     )
 
 
+def test_resolver_prefers_artist_official_channel_over_unrelated_reupload():
+    from music.resolver import _score_result
+
+    query = "what i mean modjo"
+    official_lyric = {
+        "title": "Modjo - What I Mean (Official Lyric Video)",
+        "uploader": "ModjoOfficial",
+        "duration": 235,
+    }
+    reupload = {
+        "title": "What I Mean - Modjo",
+        "uploader": "Tokzen Records",
+        "duration": 235,
+    }
+
+    assert _score_result(official_lyric, query) > _score_result(reupload, query)
+
+
+def test_resolver_prefers_official_lyric_over_official_video_for_audio():
+    from music.resolver import _score_result
+
+    query = "what i mean modjo"
+    official_lyric = {
+        "title": "Modjo - What I Mean (Official Lyric Video)",
+        "uploader": "ModjoOfficial",
+        "duration": 235,
+    }
+    official_video = {
+        "title": "Modjo - What I Mean (Official Music Video)",
+        "uploader": "ModjoOfficial",
+        "duration": 235,
+    }
+
+    assert _score_result(official_lyric, query) > _score_result(official_video, query)
+
+
+def test_resolver_rejects_playable_but_irrelevant_results():
+    from music.resolver import _filter_irrelevant_entries
+
+    candidates = [
+        (10, {"title": "Stay up late- Talking heads Lyrics", "uploader": "dlamitp"}),
+        (20, {"title": "Talking Heads - Walk It Down (Official Audio)", "uploader": "Talking Heads"}),
+    ]
+
+    filtered = _filter_irrelevant_entries(
+        candidates,
+        "plate walk it down talking heads official audio",
+    )
+
+    assert [entry["title"] for _, entry in filtered] == [
+        "Talking Heads - Walk It Down (Official Audio)"
+    ]
+
+
 def test_remove_current_song_routes_to_skip(monkeypatch):
     import bot.tool_executor as executor
 
@@ -189,3 +243,121 @@ def test_unknown_tool_arguments_are_rejected():
     )
 
     assert result == "Invalid arguments for pause_music: Unexpected argument(s): unexpected."
+
+
+def test_leave_voice_stops_listener_and_disconnects_player(monkeypatch):
+    import bot.tool_executor as executor
+    import voice.listener as listener
+
+    events = []
+
+    class Player:
+        async def disconnect(self):
+            events.append("player-disconnected")
+
+    async def stop_listening(guild):
+        events.append("listener-stopped")
+
+    monkeypatch.setattr(executor.voice_manager, "get_player", lambda guild: Player())
+    monkeypatch.setattr(listener.voice_listener_manager, "stop_listening", stop_listening)
+
+    result = asyncio.run(executor._handle_leave_voice(_message("leave"), {}))
+
+    assert result == "Leaving the voice channel."
+    assert events == ["listener-stopped", "player-disconnected"]
+
+
+def test_music_control_confirmation_uses_actual_tool_result(monkeypatch):
+    import voice.handler as handler
+
+    async def send_to_openai(payload):
+        assert "Removed one song" in payload["messages"][1]["content"]
+        return {"choices": [{"message": {"content": "Removed the queued song."}}]}
+
+    monkeypatch.setattr(handler, "send_to_openai", send_to_openai)
+
+    result = asyncio.run(
+        handler._music_action_confirmation(
+            "delete position one on queue",
+            "delete_track",
+            "Removed one song: 'Example'",
+        )
+    )
+
+    assert result == "Removed the queued song."
+
+
+def test_undo_confirmation_is_casual_and_does_not_include_song_details(monkeypatch):
+    import voice.handler as handler
+
+    async def send_to_openai(payload):
+        prompt = payload["messages"][0]["content"]
+        assert "casually and briefly" in prompt
+        assert "Do not mention the song, artist" in prompt
+        return {"choices": [{"message": {"content": "Got it, I deleted it."}}]}
+
+    monkeypatch.setattr(handler, "send_to_openai", send_to_openai)
+
+    result = asyncio.run(
+        handler._music_action_confirmation(
+            "wrong song",
+            "undo_last_song_request",
+            "Deleted the most recently requested song.",
+        )
+    )
+
+    assert result == "Got it, I deleted it."
+
+
+def test_skip_confirmation_is_brief_and_does_not_include_song_details(monkeypatch):
+    import voice.handler as handler
+
+    async def send_to_openai(payload):
+        prompt = payload["messages"][0]["content"]
+        assert "Okay, skipped it" in prompt
+        assert "Do not mention the song, artist" in prompt
+        return {"choices": [{"message": {"content": "Okay, skipped it."}}]}
+
+    monkeypatch.setattr(handler, "send_to_openai", send_to_openai)
+
+    result = asyncio.run(
+        handler._music_action_confirmation(
+            "skip it",
+            "skip_track",
+            "Skipped: A song with a long title.",
+        )
+    )
+
+    assert result == "Okay, skipped it."
+
+
+def test_undo_last_song_request_removes_newest_queued_song(monkeypatch):
+    import bot.tool_executor as executor
+
+    newest = _track("Newest")
+    player = SimpleNamespace(current=_track("Playing"), queue=deque([_track("Older"), newest]))
+    monkeypatch.setattr(executor.voice_manager, "get_player", lambda guild: player)
+
+    result = asyncio.run(
+        executor._handle_undo_last_song_request(_message("wrong song"), {})
+    )
+
+    assert result == "Deleted the most recently requested song."
+    assert [track.title for track in player.queue] == ["Older"]
+    assert player.current.title == "Playing"
+
+
+def test_undo_last_song_request_removes_only_current_song_when_queue_is_empty(monkeypatch):
+    import bot.tool_executor as executor
+
+    player = SimpleNamespace(
+        current=_track("Playing"), queue=deque(), voice_client=None, is_playing=False,
+    )
+    monkeypatch.setattr(executor.voice_manager, "get_player", lambda guild: player)
+
+    result = asyncio.run(
+        executor._handle_undo_last_song_request(_message("canción equivocada"), {})
+    )
+
+    assert result == "Deleted the most recently requested song."
+    assert player.current is None

@@ -695,6 +695,7 @@ class GuildVoiceSession:
         )
 
     async def stop(self):
+        current_task = asyncio.current_task()
         if self._idle_task:
             self._idle_task.cancel()
             self._idle_task = None
@@ -704,7 +705,7 @@ class GuildVoiceSession:
         if self._connection_watchdog_task:
             self._connection_watchdog_task.cancel()
             self._connection_watchdog_task = None
-        if self._pipeline_task:
+        if self._pipeline_task and self._pipeline_task is not current_task:
             self._pipeline_task.cancel()
             self._pipeline_task = None
         self.clip_buffer.stop()
@@ -853,6 +854,7 @@ class GuildVoiceSession:
         from voice.stt import transcribe
         from voice.tts import speak, play_activation, cancel_tts, MixerSource
         from voice.handler import handle_voice_command
+        from music.player import voice_manager
 
         member = self.guild.get_member(uid)
         if not member:
@@ -960,19 +962,8 @@ class GuildVoiceSession:
                     if should_leave:
                         await asyncio.sleep(1)
                         logger.info("[voice] → leaving voice channel")
-                        if self._idle_task:
-                            self._idle_task.cancel()
-                            self._idle_task = None
-                        voice_listener_manager._sessions.pop(self.guild.id, None)
-                        try:
-                            if self._voice_client and self._voice_client.is_connected():
-                                self._stop_receiving()
-                                await self._voice_client.disconnect()
-                                logger.info("[voice] → disconnected")
-                        except Exception as e:
-                            logger.error(f"[voice] → disconnect failed: {e}")
-                        self._voice_client = None
-                        self.sink = None
+                        await voice_listener_manager.stop_listening(self.guild)
+                        await voice_manager.get_player(self.guild).disconnect()
                 else:
                     logger.debug(f"[voice] music command pipeline completed in {elapsed:.0f}ms | final_reply=no")
 

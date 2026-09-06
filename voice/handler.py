@@ -159,6 +159,65 @@ async def _song_confirmation(text: str, details: str, *, searching: bool) -> str
     return outcome.get("message", "The song request failed.")
 
 
+async def _music_action_confirmation(text: str, tool_name: str, details: str) -> str:
+    """Turn a completed non-playback music action into a short spoken reply."""
+    started = time.perf_counter()
+    language = "Spanish" if _looks_like_spanish(text) else "English"
+    if tool_name == "undo_last_song_request":
+        instruction = (
+            "Acknowledge casually and briefly, like 'Got it, I deleted it' or "
+            "'Sorry about that, I deleted it.' Do not mention the song, artist, "
+            "or any other details."
+        )
+    elif tool_name == "skip_track":
+        instruction = (
+            "Acknowledge casually and briefly, like 'Okay, skipped it.' Do not "
+            "mention the song, artist, or any other details."
+        )
+    else:
+        instruction = (
+            "Report the actual music-control outcome provided below. Do not "
+            "invent details or ask questions."
+        )
+    try:
+        response = await asyncio.wait_for(send_to_openai({
+            "messages": [
+                {"role": "system", "content": (
+                    f"Respond in {language} with one short spoken sentence. "
+                    f"{instruction} Do not use markdown or mention tools. Keep it under 15 words."
+                )},
+                {"role": "user", "content": json.dumps({
+                    "action": tool_name,
+                    "outcome": details,
+                })},
+            ],
+            "max_completion_tokens": 80,
+            "reasoning_effort": "none",
+        }), timeout=5.0)
+        if response:
+            result = (response["choices"][0]["message"].get("content") or "").strip()
+            logger.debug(
+                "[voice] music action confirmation LLM completed in %.0fms | action=%s | result=%s",
+                (time.perf_counter() - started) * 1000,
+                tool_name,
+                "ok" if result else "empty",
+            )
+            if result:
+                return result
+    except Exception as exc:
+        logger.debug(
+            "[voice] music action confirmation failed after %.0fms | action=%s: %s",
+            (time.perf_counter() - started) * 1000,
+            tool_name,
+            exc,
+        )
+    if tool_name == "undo_last_song_request":
+        return "Got it, I deleted it."
+    if tool_name == "skip_track":
+        return "Okay, skipped it."
+    return details
+
+
 def _looks_like_spanish(text: str) -> bool:
     """Choose the supported acknowledgement language from the spoken command."""
     lowered = (text or "").casefold()
@@ -428,15 +487,18 @@ async def handle_voice_command(
             ],
         })
 
-        song_confirmations = []
+        music_confirmations = []
         for tc in tool_calls:
             t_tool = time.perf_counter()
             if tc["name"] == "play_music":
                 result, confirmation = await _execute_song_request(tc, proxy, text)
                 if confirmation:
-                    song_confirmations.append(confirmation)
+                    music_confirmations.append(confirmation)
             elif is_music_tool(tc["name"]):
                 result = await _execute_playback_tool(tc, proxy)
+                confirmation = await _music_action_confirmation(text, tc["name"], result)
+                if confirmation:
+                    music_confirmations.append(confirmation)
             elif tc["name"] == "web_search":
                 result = await _execute_web_search_tool(tc, proxy, text)
             else:
@@ -457,9 +519,9 @@ async def handle_voice_command(
             tool_names = [tc["name"] for tc in tool_calls]
             logger.debug(
                 "[voice] tools completed | tools=%s | total=%.0fms | final_reply=%s",
-                ", ".join(tool_names), elapsed, "yes" if song_confirmations else "no",
+                ", ".join(tool_names), elapsed, "yes" if music_confirmations else "no",
             )
-            return " ".join(song_confirmations), False
+            return " ".join(music_confirmations), False
 
         t_followup = time.perf_counter()
         response_data = await send_to_openai(

@@ -37,6 +37,7 @@ def is_music_tool(name: str) -> bool:
     return name in {
         "play_music", "skip_track", "pause_music", "resume_music",
         "stop_music", "move_track", "delete_track", "queue_bulk",
+        "undo_last_song_request",
     }
 
 
@@ -147,10 +148,16 @@ async def _handle_stop_music(message, args):
 
 
 async def _handle_leave_voice(message, args):
+    from voice.listener import voice_listener_manager
+
     player = voice_manager.get_player(message.guild)
-    player.queue.clear()
-    if player.is_playing:
-        player.voice_client.stop_playing()
+    # Voice commands speak the goodbye before leaving; the voice pipeline owns
+    # the final disconnect after that response completes.
+    if _is_voice_proxy(message):
+        return "Leaving the voice channel."
+
+    await voice_listener_manager.stop_listening(message.guild)
+    await player.disconnect()
     return "Leaving the voice channel."
 
 
@@ -231,6 +238,24 @@ async def _handle_delete_track(message, args):
     return result
 
 
+async def _handle_undo_last_song_request(message, args):
+    """Remove only the newest requested song, including the active song if alone."""
+    player = voice_manager.get_player(message.guild)
+    if player.queue:
+        player.queue.pop()
+        return "Deleted the most recently requested song."
+
+    if player.current:
+        if player.voice_client and player.is_playing:
+            player._manual_stop = True
+            player.voice_client.stop_playing()
+        else:
+            player.current = None
+        return "Deleted the most recently requested song."
+
+    return "There is no recent song request to undo."
+
+
 async def _handle_join_voice(message, args):
     requester = message.author
     if not requester.voice or not requester.voice.channel:
@@ -277,6 +302,7 @@ TOOL_HANDLERS = {
     "get_queue": _handle_get_queue,
     "move_track": _handle_move_track,
     "delete_track": _handle_delete_track,
+    "undo_last_song_request": _handle_undo_last_song_request,
     "join_voice": _handle_join_voice,
     "get_server_info": _handle_get_server_info,
     "get_member_activity": _handle_get_member_activity,
@@ -289,6 +315,7 @@ _TOOL_ARGUMENT_KEYS = {
     "queue_bulk": {"queries", "is_playlist"},
     "move_track": {"from_position", "to_position", "track_name"},
     "delete_track": {"positions", "position", "track_name"},
+    "undo_last_song_request": set(),
     "get_server_info": {"question"},
     "web_search": {"question"},
 }
