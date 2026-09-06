@@ -214,6 +214,11 @@ async def on_voice_state_update(member, before, after):
     # When the BOT joins a voice channel — start listening automatically
     if member.id == client.user.id:
         if after.channel is not None and before.channel != after.channel:
+            # join_voice() and music playback start the listener explicitly.
+            # Discord emits this event for those joins as well, so do not
+            # create a competing session while that startup is in progress.
+            if voice_listener_manager.get_session(member.guild) is not None:
+                return
             await asyncio.sleep(1.0)
             loop = asyncio.get_event_loop()
             await voice_listener_manager.start_listening(

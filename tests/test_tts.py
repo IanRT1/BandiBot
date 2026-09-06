@@ -6,6 +6,94 @@ from voice.audio import resample_int16_mono
 from voice.tts_providers import TTS_PROVIDERS, _format_api_error
 
 
+def test_idle_speech_promotes_to_ducked_music_without_losing_audio():
+    import numpy as np
+    from voice.tts_sources import MixerSource, StandaloneSource, DISCORD_FRAME_SIZE
+
+    class Music:
+        def cleanup(self):
+            pass
+
+        def read(self):
+            return np.full(DISCORD_FRAME_SIZE // 2, 1000, dtype=np.int16).tobytes()
+
+    source = StandaloneSource()
+    pcm = np.full(DISCORD_FRAME_SIZE // 4, 2000, dtype=np.int16).tobytes()
+    source.feed(pcm)
+    mixer = MixerSource(Music())
+    assert source.attach_music(mixer, lambda error: None)
+    frame = np.frombuffer(source.read(), dtype=np.int16)
+    assert 2300 <= frame[-1] < frame[0] <= 3000
+    source.feed(pcm)  # Provider chunks continue arriving after handoff.
+    source.set_done()
+    frame = np.frombuffer(source.read(), dtype=np.int16)
+    assert 2300 <= frame[-1] < frame[0] <= 3000
+    for _ in range(15):
+        frame = np.frombuffer(source.read(), dtype=np.int16)
+    assert frame[-1] == 1000
+    assert source._finished_evt.is_set()
+
+
+def test_promoted_speech_cancellation_keeps_music_and_completion_callback():
+    import numpy as np
+    from voice.tts_sources import MixerSource, StandaloneSource, DISCORD_FRAME_SIZE
+
+    class Music:
+        def cleanup(self):
+            pass
+
+        def read(self):
+            return np.full(DISCORD_FRAME_SIZE // 2, 1000, dtype=np.int16).tobytes()
+
+    source = StandaloneSource()
+    completed = []
+    assert source.attach_music(MixerSource(Music()), completed.append)
+    source.cancel()
+    assert np.all(np.frombuffer(source.read(), dtype=np.int16) == 1000)
+    assert completed == []
+    source.after_playback(None)
+    assert completed == [None]
+
+
+def test_exhausted_standalone_cannot_accept_music():
+    from voice.tts_sources import StandaloneSource
+
+    source = StandaloneSource()
+    source.set_done()
+    assert source.read() == b""
+    assert not source.attach_music(object(), None)
+
+
+@pytest.mark.parametrize("cancelled", [False, True])
+def test_ducking_ramps_holds_streaming_gaps_and_recovers(cancelled):
+    import numpy as np
+    from voice.tts_sources import MixerSource, DISCORD_FRAME_SIZE
+
+    class Music:
+        def read(self):
+            return np.full(DISCORD_FRAME_SIZE // 2, 10000, dtype=np.int16).tobytes()
+
+    mixer = MixerSource(Music())
+    assert np.all(np.frombuffer(mixer.read(), dtype=np.int16) == 10000)
+    mixer.feed_tts(bytes(DISCORD_FRAME_SIZE // 2 * 5))
+    attack = np.concatenate([np.frombuffer(mixer.read(), dtype=np.int16) for _ in range(5)])
+    assert attack[0] > 9900
+    assert attack[-1] == 3000
+    assert np.all(np.diff(attack.astype(int)) <= 0)
+    # No chunks available yet, but provider has not finished.
+    for _ in range(3):
+        assert np.all(np.frombuffer(mixer.read(), dtype=np.int16) == 3000)
+    if cancelled:
+        mixer.cancel()
+    else:
+        mixer.finish_tts()
+    release = np.concatenate([np.frombuffer(mixer.read(), dtype=np.int16) for _ in range(15)])
+    assert release[0] < 3100
+    assert release[-1] == 10000
+    assert np.all(np.diff(release.astype(int)) >= 0)
+    assert np.array_equal(release[::2], release[1::2])
+
+
 def test_all_tts_providers_are_registered():
     assert {"kokoro", "deepgram", "elevenlabs"} <= TTS_PROVIDERS.keys()
 

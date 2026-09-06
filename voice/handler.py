@@ -36,6 +36,7 @@ import json
 import time
 import asyncio
 import logging
+import re
 
 import discord
 
@@ -108,9 +109,12 @@ async def _search_acknowledgement(text: str) -> str:
 
 async def _song_confirmation(text: str, details: str, *, searching: bool) -> str:
     """Generate a compact song acknowledgement using request or confirmed outcome."""
+    language = "Spanish" if _looks_like_spanish(text) else "English"
     instruction = (
-        "Say you are searching for the requested song and artist. Repeat the supplied search "
-        "details naturally; do not claim it was found or queued."
+        f"Respond in {language}. Say you are playing the requested song. Use the natural "
+        "equivalent of 'playing' in that language, and mention the song and artist "
+        "only once when supplied. Do not say you are searching, checking, or using search details. "
+        "Do not use Portuguese or another language. Keep it minimal: one short sentence."
         if searching else
         "Report the actual tool outcome. For a queued song, name the resolved song and artist "
         "when available and its exact queue position. For failure, briefly explain the failure. "
@@ -133,11 +137,26 @@ async def _song_confirmation(text: str, details: str, *, searching: bool) -> str
             return (response["choices"][0]["message"].get("content") or "").strip()
     except Exception as exc:
         logger.debug("[voice] song confirmation unavailable: %s", exc)
-    return "" if searching else details
+    if searching:
+        return ""
+    outcome = json.loads(details)
+    if outcome["status"] == "queued":
+        return f"Queued at position {outcome['queue_position']}: {outcome['title']}"
+    return outcome.get("message", "The song request failed.")
+
+
+def _looks_like_spanish(text: str) -> bool:
+    """Choose the supported acknowledgement language from the spoken command."""
+    lowered = (text or "").casefold()
+    return bool(re.search(
+        r"\b(?:reproduce|reproducir|pon|ponme|toca|tocar|quiero|"
+        r"cancion|canción|musica|música|de|del|por|la|el)\b|[¿¡áéíóúñ]",
+        lowered,
+    ))
 
 
 async def _announce_song_search(guild, text: str, query: str, playback_task):
-    """Speak during resolution, skipping stale acknowledgements after it finishes."""
+    """Speak the request acknowledgement even if playback starts during generation."""
     from voice.listener import voice_listener_manager
     from voice.tts import speak
     from core.interaction_logging import log_message
@@ -146,7 +165,7 @@ async def _announce_song_search(guild, text: str, query: str, playback_task):
     if not session or not session._voice_client or not session._voice_client.is_connected():
         return
     acknowledgement = await _song_confirmation(text, query, searching=True)
-    if not acknowledgement or playback_task.done():
+    if not acknowledgement:
         return
     log_message(logger, "voice", "bot", "BandiBot", acknowledgement)
     await speak(session._voice_client, acknowledgement, guild=guild, clip_buffer=session.clip_buffer)
@@ -171,7 +190,8 @@ async def _execute_song_request(tool_call, proxy, text: str) -> tuple[str, str]:
                 await acknowledgement_task
             except Exception as exc:
                 logger.debug("[voice] song search acknowledgement failed: %s", exc)
-        if result.startswith("Now playing:"):
+        outcome = json.loads(result)
+        if outcome["status"] in {"playing", "starting"}:
             return result, ""
         return result, await _song_confirmation(text, result, searching=False)
     finally:
@@ -420,7 +440,10 @@ async def handle_voice_command(
         if called_music:
             elapsed = (time.perf_counter() - t_start) * 1000
             tool_names = [tc["name"] for tc in tool_calls]
-            logger.debug(f"[voice]  ← {', '.join(tool_names)} ({elapsed:.0f}ms) | no TTS")
+            logger.debug(
+                "[voice] tools completed | tools=%s | total=%.0fms | final_reply=%s",
+                ", ".join(tool_names), elapsed, "yes" if song_confirmations else "no",
+            )
             return " ".join(song_confirmations), False
 
         t_followup = time.perf_counter()

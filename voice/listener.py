@@ -345,7 +345,7 @@ class BandiBotSink(voice_recv.AudioSink):
 
     def _get_oww_model(self, uid: int) -> Model:
         if uid not in self._oww_models:
-            self._oww_models[uid] = Model(wakeword_models=[WAKEWORD_MODEL_PATH])
+            self._oww_models[uid] = Model(wakeword_models=[WAKEWORD_MODEL_PATH], inference_framework="onnx")
         return self._oww_models[uid]
 
     def write(self, user: discord.User, data: voice_recv.VoiceData):
@@ -563,7 +563,7 @@ class GuildVoiceSession:
         if not os.path.exists(WAKEWORD_MODEL_PATH):
             raise FileNotFoundError(f"Wake word model not found at {WAKEWORD_MODEL_PATH}")
 
-        self._oww_model      = Model(wakeword_models=[WAKEWORD_MODEL_PATH])
+        self._oww_model      = Model(wakeword_models=[WAKEWORD_MODEL_PATH], inference_framework="onnx")
         self._oww_model_name = list(self._oww_model.models.keys())[0]
         self._vad_model      = load_silero_vad()
 
@@ -611,6 +611,7 @@ class GuildVoiceSession:
             return not standalone._finished_evt.is_set() and not standalone.is_cancelled()
 
         source = getattr(self._voice_client, "source", None)
+        source = getattr(source, "mixer", None) or source
         if isinstance(source, MixerSource):
             with source._lock:
                 return source._tts_active or bool(source._tts_buf)
@@ -923,7 +924,7 @@ class GuildVoiceSession:
                         self._voice_client = None
                         self.sink = None
                 else:
-                    logger.debug(f"[voice] music command pipeline completed in {elapsed:.0f}ms | no TTS")
+                    logger.debug(f"[voice] music command pipeline completed in {elapsed:.0f}ms | final_reply=no")
 
                 if completion_status != "interrupted":
                     completion_status = "done"
@@ -955,46 +956,50 @@ class VoiceListenerManager:
 
     def __init__(self):
         self._sessions: dict[int, GuildVoiceSession] = {}
+        self._lifecycle_lock = asyncio.Lock()
 
     def get_session(self, guild: discord.Guild) -> Optional[GuildVoiceSession]:
         return self._sessions.get(guild.id)
 
     async def start_listening(self, guild, voice_channel, client, loop):
-        if not VOICE_ENABLED:
-            logger.info("[voice] disabled — skipping")
-            return None
-        existing = self._sessions.get(guild.id)
-        if existing:
-            voice_client = existing._voice_client
-            if (
-                existing.sink is not None
-                and voice_client is not None
-                and voice_client.is_connected()
-            ):
-                return existing
-            await existing.stop()
-            self._sessions.pop(guild.id, None)
-        session = GuildVoiceSession(guild, client, loop)
-        self._sessions[guild.id] = session
-        await session.start(voice_channel)
-        return session
+        async with self._lifecycle_lock:
+            if not VOICE_ENABLED:
+                logger.info("[voice] disabled — skipping")
+                return None
+            existing = self._sessions.get(guild.id)
+            if existing:
+                voice_client = existing._voice_client
+                if (
+                    existing.sink is not None
+                    and voice_client is not None
+                    and voice_client.is_connected()
+                ):
+                    return existing
+                await existing.stop()
+                self._sessions.pop(guild.id, None)
+            session = GuildVoiceSession(guild, client, loop)
+            self._sessions[guild.id] = session
+            await session.start(voice_channel)
+            return session
 
     async def stop_listening(self, guild):
-        if not VOICE_ENABLED:
-            return
-        session = self._sessions.pop(guild.id, None)
-        if session:
-            await session.stop()
+        async with self._lifecycle_lock:
+            if not VOICE_ENABLED:
+                return
+            session = self._sessions.pop(guild.id, None)
+            if session:
+                await session.stop()
 
     async def shutdown(self):
         """Stop all active voice listener sessions during process shutdown."""
-        sessions = list(self._sessions.items())
-        self._sessions.clear()
-        for guild_id, session in sessions:
-            try:
-                await session.stop()
-            except Exception as exc:
-                logger.error("[voice] shutdown cleanup failed for guild %s: %s", guild_id, exc)
+        async with self._lifecycle_lock:
+            sessions = list(self._sessions.items())
+            self._sessions.clear()
+            for guild_id, session in sessions:
+                try:
+                    await session.stop()
+                except Exception as exc:
+                    logger.error("[voice] shutdown cleanup failed for guild %s: %s", guild_id, exc)
 
 
 def notify_music_activity(guild: discord.Guild):

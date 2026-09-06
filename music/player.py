@@ -40,6 +40,7 @@ import discord
 
 from music.resolver import extract_playlist, resolve_track
 from music.tracks import Track
+from music.results import PlayResult
 
 logger = logging.getLogger(__name__)
 
@@ -329,7 +330,9 @@ class GuildPlayer:
 
             async def _wait_and_play():
                 try:
-                    refresh_query = track.query or track.webpage_url or track.title
+                    # Refresh the signed stream URL directly; searching again
+                    # would repeat candidate ranking for the same track.
+                    refresh_query = track.webpage_url or track.query or track.title
                     resolved = await _resolve_track_async(
                         refresh_query, track.requested_by
                     )
@@ -345,6 +348,10 @@ class GuildPlayer:
         self._play_resolved(track)
 
     def _voice_busy_without_music(self) -> bool:
+        from voice.tts_sources import StandaloneSource
+        source = getattr(self.voice_client, "source", None)
+        if isinstance(source, StandaloneSource) and source.mixer is None and not source._exhausted:
+            return False
         return (
             self.is_connected
             and self.current is None
@@ -399,7 +406,7 @@ class GuildPlayer:
         # otherwise bypass play_next()'s busy check, causing Discord's
         # ``Already playing audio`` exception. Put the track back and let the
         # normal free-voice scheduler start it after the standalone source ends.
-        if self.current is None and self.voice_client.is_playing():
+        if self._voice_busy_without_music():
             logger.info(
                 "[music] resolved track deferred; voice client is busy with standalone audio"
             )
@@ -506,7 +513,13 @@ class GuildPlayer:
             loop.call_soon_threadsafe(self.play_next)
 
         try:
-            self.voice_client.play(mixer_source, after=_after)
+            from voice.tts_sources import StandaloneSource
+            active_source = getattr(self.voice_client, "source", None)
+            if (self.voice_client.is_playing() and isinstance(active_source, StandaloneSource)
+                    and active_source.attach_music(mixer_source, _after)):
+                logger.debug("[music] attached music under active speech with ducking")
+            else:
+                self.voice_client.play(mixer_source, after=_after)
         except Exception as exc:
             # Discord can reject play() when another standalone source starts
             # between our busy check and this call. Do not lose the track or
@@ -590,9 +603,9 @@ class VoiceManager:
             self._play_locks[guild_id] = asyncio.Lock()
         return self._play_locks[guild_id]
 
-    async def play(self, guild, requester_member, query: str) -> str:
+    async def play(self, guild, requester_member, query: str) -> PlayResult:
         if not requester_member.voice or not requester_member.voice.channel:
-            return "User is not in a voice channel; cannot play music."
+            return PlayResult("failed", error_code="not_in_voice", message="User is not in a voice channel; cannot play music.")
 
         voice_channel = requester_member.voice.channel
         player = self.get_player(guild)
@@ -602,20 +615,30 @@ class VoiceManager:
                 track = await _resolve_track_async(query, requester_member.display_name)
             except Exception as e:
                 logger.error(f"[music] resolve failed for {query!r}: {e}")
-                return f"Could not resolve track: {e}"
+                return PlayResult("failed", error_code="resolution_failed", message=f"Could not resolve track: {e}")
 
-            await player.connect(voice_channel)
+            try:
+                await player.connect(voice_channel)
+            except Exception as exc:
+                return PlayResult("failed", error_code="connection_failed", message=f"Could not connect to voice: {exc}")
             player.queue.append(track)
 
             is_busy = player.has_active_track or (player.is_connected and player.voice_client.is_paused())
 
             if not is_busy:
                 player.play_next()
-                return f"Now playing: {track.title}"
+                if player.current is track:
+                    return PlayResult("playing", title=track.title, artist=track.artist or None)
+                if track in player.queue:
+                    if player.current is None and player.queue[0] is track:
+                        return PlayResult("starting", title=track.title, artist=track.artist or None)
+                    return PlayResult("queued", title=track.title, artist=track.artist or None,
+                                      queue_position=list(player.queue).index(track) + 1)
+                return PlayResult("failed", error_code="playback_failed", message="The track could not start playback.")
             else:
                 position = len(player.queue)
                 logger.info("[music] queued position=%d: %s", position, track.title)
-                return f"Queued at position {position}: {track.title}"
+                return PlayResult("queued", title=track.title, artist=track.artist or None, queue_position=position)
 
     async def queue_bulk(self, guild, requester_member, queries: list[str], text_channel=None) -> str:
         """Queue multiple songs as placeholders and resolve them in background."""

@@ -9,11 +9,66 @@ Coverage:
 """
 
 import asyncio
+import json
 from types import SimpleNamespace
 
 import pytest
 
 from voice import handler
+
+
+def test_song_acknowledgement_is_spoken_when_resolution_finishes_first(monkeypatch):
+    from unittest.mock import AsyncMock
+    from voice.listener import voice_listener_manager
+    import voice.tts as tts
+
+    client = SimpleNamespace(is_connected=lambda: True)
+    session = SimpleNamespace(_voice_client=client, clip_buffer=None)
+    monkeypatch.setattr(voice_listener_manager, "get_session", lambda guild: session)
+    monkeypatch.setattr(handler, "_song_confirmation", AsyncMock(return_value="Reproduciendo Trains de Porcupine Tree."))
+    speak = AsyncMock()
+    monkeypatch.setattr(tts, "speak", speak)
+
+    async def run():
+        task = asyncio.create_task(asyncio.sleep(0))
+        await task
+        await handler._announce_song_search(object(), "Play Trains", "Trains Porcupine Tree", task)
+
+    asyncio.run(run())
+    speak.assert_awaited_once()
+    assert speak.call_args.args[1] == "Reproduciendo Trains de Porcupine Tree."
+
+
+def test_song_search_acknowledgement_requests_minimal_playing_status(monkeypatch):
+    async def generate(payload):
+        instruction = payload["messages"][0]["content"]
+        assert "Respond in English" in instruction
+        assert "Do not say you are searching" in instruction
+        assert "Do not use Portuguese" in instruction
+        assert "Keep it minimal" in instruction
+        return {"choices": [{"message": {"content": "Reproduciendo Trains de Porcupine Tree."}}]}
+
+    monkeypatch.setattr(handler, "send_to_openai", generate)
+    result = asyncio.run(handler._song_confirmation(
+        "Play Trains by Porcupine Tree.",
+        "Trains Porcupine Tree",
+        searching=True,
+    ))
+    assert result == "Reproduciendo Trains de Porcupine Tree."
+
+
+def test_song_search_acknowledgement_selects_spanish_for_spanish_request(monkeypatch):
+    async def generate(payload):
+        assert "Respond in Spanish" in payload["messages"][0]["content"]
+        return {"choices": [{"message": {"content": "Reproduciendo Trains."}}]}
+
+    monkeypatch.setattr(handler, "send_to_openai", generate)
+    result = asyncio.run(handler._song_confirmation(
+        "Reproduce Trains de Porcupine Tree.",
+        "Trains Porcupine Tree",
+        searching=True,
+    ))
+    assert result == "Reproduciendo Trains."
 
 
 def test_voice_model_receives_stop_context_and_live_search(monkeypatch):
@@ -136,10 +191,11 @@ def test_interruption_cancels_search_and_acknowledgement(monkeypatch):
 
 
 @pytest.mark.parametrize("busy, outcome, expected_confirmation", [
-    (False, "Now playing: The Lady Don't Mind - Talking Heads", ""),
-    (True, "Queued at position 4: The Lady Don't Mind - Talking Heads", "confirmed"),
-    (True, "Now playing: The Lady Don't Mind - Talking Heads", ""),
-    (False, "No matching track found.", "confirmed"),
+    (False, {"status": "starting", "title": "Get Lucky", "artist": "Daft Punk"}, ""),
+    (False, {"status": "playing", "title": "The Lady Don't Mind", "artist": "Talking Heads"}, ""),
+    (True, {"status": "queued", "title": "The Lady Don't Mind", "artist": "Talking Heads", "queue_position": 4}, "confirmed"),
+    (True, {"status": "playing", "title": "The Lady Don't Mind", "artist": "Talking Heads"}, ""),
+    (False, {"status": "failed", "error_code": "resolution_failed", "message": "No matching track found."}, "confirmed"),
 ])
 def test_song_acknowledgement_depends_on_actual_outcome(
     monkeypatch, busy, outcome, expected_confirmation,
@@ -150,6 +206,7 @@ def test_song_acknowledgement_depends_on_actual_outcome(
         has_active_track=busy, is_connected=False,
     ))
     calls = []
+    outcome = json.dumps(outcome)
 
     async def run():
         searching = asyncio.Event()

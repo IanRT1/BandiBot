@@ -49,6 +49,12 @@ async def transcribe(wav_bytes: bytes) -> str:
         logger.debug(f"[stt]  → transcribing {len(wav_bytes) // 1000}KB")
         payload = {"buffer": wav_bytes, "mimetype": "audio/wav"}
         response = await _client.listen.asyncprerecorded.v("1").transcribe_file(payload, _OPTIONS)
+        request_ms = (time.perf_counter() - t) * 1000
+        logger.debug(
+            "[stt] request completed | request_id=%s | bytes=%d | total=%.0fms",
+            getattr(getattr(response, "metadata", None), "request_id", "unavailable"),
+            len(wav_bytes), request_ms,
+        )
         try:
             with wave.open(io.BytesIO(wav_bytes), "rb") as audio:
                 record_usage("deepgram", "audio_seconds", audio.getnframes() / audio.getframerate())

@@ -22,11 +22,13 @@ Boundary:
 """
 
 import asyncio
+import json
 import logging
 import re
 from collections import deque
 
 from music.player import voice_manager
+from music.results import PlayResult
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +67,7 @@ async def _handle_play_music(message, args):
                 await search_msg.edit(content="Took too long to resolve that track.")
             except Exception:
                 pass
-        return "Took too long to resolve that track. Try again."
+        return json.dumps(PlayResult("failed", error_code="timeout", message="Took too long to resolve that track. Try again.").to_dict())
     except asyncio.CancelledError:
         if search_msg:
             try:
@@ -76,21 +78,24 @@ async def _handle_play_music(message, args):
 
     if search_msg:
         try:
-            if result.startswith("Queued"):
-                track_title = result.split(": ", 1)[1] if ": " in result else result
-                await search_msg.edit(content=f"Queued: **{track_title}**")
-            elif result.startswith("Now playing:"):
+            if result.status == "queued":
+                track_title = result.title
+                await search_msg.edit(content=f"Queued: **{track_title}** — position {result.queue_position}")
+            elif result.status in {"playing", "starting"}:
                 await search_msg.delete()
             else:
-                await search_msg.edit(content=result)
+                await search_msg.edit(content=result.message)
         except Exception:
             pass
 
-    if result.startswith("Queued") and message.channel:
+    if result.status == "queued" and message.channel:
         from music.now_playing import update_now_playing_queue
-        await update_now_playing_queue(player, len(player.queue))
+        try:
+            await update_now_playing_queue(player, len(player.queue))
+        except Exception:
+            logger.warning("[music] queued track but could not refresh queue banner", exc_info=True)
 
-    return result
+    return json.dumps(result.to_dict(), ensure_ascii=False)
 
 
 async def _handle_queue_bulk(message, args):
@@ -293,6 +298,8 @@ async def execute_tool_call(tool_call, message):
         return await handler(message, args)
     except Exception as e:
         logger.error(f"  tool {name} raised: {e}")
+        if name == "play_music":
+            return json.dumps(PlayResult("failed", error_code="tool_error", message=f"Tool error: {e}").to_dict())
         return f"Tool error: {e}"
 
 

@@ -49,6 +49,7 @@ def cancel_tts(voice_client: discord.VoiceClient):
         return
 
     source = getattr(voice_client, "source", None)
+    source = getattr(source, "mixer", None) or source
     if isinstance(source, MixerSource):
         source.cancel()
         return
@@ -78,6 +79,7 @@ async def speak(
     logger.debug(f"[tts]  -> speaking ({len(text)} chars) via {TTS_PROVIDER}")
 
     source = getattr(voice_client, "source", None)
+    source = getattr(source, "mixer", None) or source
     is_mixer = isinstance(source, MixerSource) and voice_client.is_playing()
 
     if is_mixer:
@@ -218,6 +220,7 @@ async def play_activation(voice_client: discord.VoiceClient):
         return
 
     source = getattr(voice_client, "source", None)
+    source = getattr(source, "mixer", None) or source
     if isinstance(source, MixerSource) and voice_client.is_playing():
         await _play_activation_mixed(source, wav_path)
     else:
