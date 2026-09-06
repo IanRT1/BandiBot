@@ -444,6 +444,17 @@ async def post_now_playing(
         logger.error(f"[now_playing] failed to post: {e}")
         return None
 
+    # Playback may be stopped while Discord is processing the send. In that
+    # window stop() cannot see this message or view yet, so remove the message
+    # here instead of publishing stale controls after playback has ended.
+    if current_track is not None and player.current is not current_track:
+        try:
+            await message.delete()
+        except Exception as e:
+            logger.error(f"[now_playing] failed to delete stale initial banner: {e}")
+        logger.info(f"[now_playing] removed stale initial banner for {title!r}")
+        return None
+
     view.message = message
     view._image_filename = image_filename
     view.start_updates()

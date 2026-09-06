@@ -41,6 +41,28 @@ def test_bare_stop_controls_music_after_interrupted_acknowledgement(monkeypatch,
     model.assert_not_awaited()
 
 
+def test_bare_stop_controls_an_in_progress_song_request(monkeypatch):
+    from unittest.mock import AsyncMock
+    from music.player import voice_manager
+
+    player = SimpleNamespace(
+        current=None, queue=[], text_channel=None, has_pending_play_requests=True
+    )
+    monkeypatch.setattr(voice_manager, "get_player", lambda guild: player)
+    execute = AsyncMock(return_value="Stopped and cleared the queue.")
+    model = AsyncMock()
+    monkeypatch.setattr(handler, "execute_tool_call", execute)
+    monkeypatch.setattr(handler, "send_to_openai", model)
+
+    result = asyncio.run(handler.handle_voice_command(
+        "Stop!", SimpleNamespace(name="Ian", nick=None), object(), object(), []
+    ))
+
+    assert result == ("Stopped and cleared the queue.", False)
+    execute.assert_awaited_once()
+    model.assert_not_awaited()
+
+
 def test_song_acknowledgement_is_spoken_when_resolution_finishes_first(monkeypatch):
     from unittest.mock import AsyncMock
     from voice.listener import voice_listener_manager

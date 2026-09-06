@@ -384,7 +384,10 @@ async def handle_voice_command(
     # The wake word already cancels speech. A standalone stop command with
     # music present must reach playback control, even during an acknowledgement.
     bare_stop = re.fullmatch(r"[\s¡¿]*(stop|para|detente)[\s.!¡¿?]*", text, re.IGNORECASE)
-    if bare_stop and (player.current or player.queue):
+    if bare_stop and (
+        player.current or player.queue
+        or getattr(player, "has_pending_play_requests", False)
+    ):
         result = await execute_tool_call(
             {"name": "stop_music", "arguments": {}},
             _FakeMsgProxy(guild, member, text),

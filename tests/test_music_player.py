@@ -46,7 +46,8 @@ def test_single_song_resolution_failure_is_structured(monkeypatch):
     import music.player as music_player
 
     manager = music_player.VoiceManager()
-    monkeypatch.setattr(manager, "get_player", lambda guild: object())
+    player = SimpleNamespace(_playback_generation=0, _pending_play_requests=0)
+    monkeypatch.setattr(manager, "get_player", lambda guild: player)
     monkeypatch.setattr(music_player, "_resolve_track_async", AsyncMock(side_effect=RuntimeError("no results")))
     member = SimpleNamespace(voice=SimpleNamespace(channel=object()), display_name="Ian")
     result = asyncio.run(manager.play(SimpleNamespace(id=1), member, "missing"))
@@ -82,6 +83,46 @@ def test_single_song_requires_voice_membership():
         "status": "failed", "error_code": "not_in_voice",
         "message": "User is not in a voice channel; cannot play music.",
     }
+
+
+def test_stop_discards_single_song_when_search_finishes_late(monkeypatch):
+    import music.player as music_player
+
+    async def run():
+        manager = music_player.VoiceManager()
+        guild = SimpleNamespace(id=1)
+        player = manager.get_player(guild)
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        voice_channel = SimpleNamespace()
+        member = SimpleNamespace(
+            voice=SimpleNamespace(channel=voice_channel), display_name="Ian"
+        )
+
+        async def resolve(*args):
+            entered.set()
+            await release.wait()
+            return _track("Late result")
+
+        connect = AsyncMock()
+        monkeypatch.setattr(music_player, "_resolve_track_async", resolve)
+        monkeypatch.setattr(player, "connect", connect)
+
+        play_task = asyncio.create_task(manager.play(guild, member, "requested song"))
+        await asyncio.wait_for(entered.wait(), 1)
+        assert player.has_pending_play_requests
+
+        assert await manager.stop(guild) == "Stopped and cleared the queue."
+        release.set()
+        result = await asyncio.wait_for(play_task, 1)
+
+        assert result.error_code == "cancelled"
+        assert not player.has_pending_play_requests
+        assert player.current is None
+        assert not player.queue
+        connect.assert_not_awaited()
+
+    asyncio.run(run())
 
 
 def test_play_tool_serializes_metadata_without_interpreting_title(monkeypatch):
@@ -153,6 +194,49 @@ def test_failed_discord_play_restores_track_and_clears_current(monkeypatch):
     assert player.current is None
     assert list(player.queue) == [track]
     assert scheduled == [True]
+
+
+def test_initial_now_playing_send_is_deleted_if_track_stops_while_posting(monkeypatch):
+    import music.now_playing as now_playing
+
+    async def run():
+        track = _track("Stopped while posting")
+        player = GuildPlayer(SimpleNamespace(name="Test Guild"))
+        player.current = track
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        message = SimpleNamespace(delete=AsyncMock())
+
+        async def send(**kwargs):
+            entered.set()
+            await release.wait()
+            return message
+
+        channel = SimpleNamespace(guild=object(), send=send)
+        monkeypatch.setattr(
+            now_playing, "generate_banner", AsyncMock(return_value=b"image")
+        )
+
+        post_task = asyncio.create_task(now_playing.post_now_playing(
+            channel,
+            player,
+            current_track=track,
+            title=track.title,
+            artist=track.artist,
+            duration_seconds=track.duration,
+            queue_size=0,
+            requested_by=track.requested_by,
+        ))
+        await asyncio.wait_for(entered.wait(), 1)
+        player.current = None
+        release.set()
+
+        assert await asyncio.wait_for(post_task, 1) is None
+        message.delete.assert_awaited_once()
+        assert player._now_playing_view is None
+        assert player.now_playing_message is None
+
+    asyncio.run(run())
 
 
 def test_voice_recovery_preserves_current_track_before_rebinding():

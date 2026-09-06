@@ -132,6 +132,7 @@ class GuildPlayer:
         self.queue: deque[Track] = deque()
         self.current: Optional[Track] = None
         self._playback_generation = 0
+        self._pending_play_requests = 0
         self.voice_client: Optional[discord.VoiceClient] = None
         self._idle_task: Optional[asyncio.Task] = None
         self._resolver_task: Optional[asyncio.Task] = None
@@ -165,6 +166,11 @@ class GuildPlayer:
         ``current`` remains authoritative during that handoff.
         """
         return self.current is not None
+
+    @property
+    def has_pending_play_requests(self) -> bool:
+        """Whether a single-song request is still resolving or connecting."""
+        return self._pending_play_requests > 0
 
     @property
     def elapsed_seconds(self) -> float:
@@ -646,36 +652,50 @@ class VoiceManager:
 
         voice_channel = requester_member.voice.channel
         player = self.get_player(guild)
+        request_generation = getattr(player, "_playback_generation", 0)
+        player._playback_generation = request_generation
+        player._pending_play_requests = getattr(player, "_pending_play_requests", 0) + 1
 
-        async with self._get_play_lock(guild.id):
-            try:
-                track = await _resolve_track_async(query, requester_member.display_name)
-            except Exception as e:
-                logger.error(f"[music] resolve failed for {query!r}: {e}")
-                return PlayResult("failed", error_code="resolution_failed", message=f"Could not resolve track: {e}")
+        try:
+            async with self._get_play_lock(guild.id):
+                if request_generation != player._playback_generation:
+                    return PlayResult("failed", error_code="cancelled", message="Song request cancelled.")
+                try:
+                    track = await _resolve_track_async(query, requester_member.display_name)
+                except Exception as e:
+                    logger.error(f"[music] resolve failed for {query!r}: {e}")
+                    return PlayResult("failed", error_code="resolution_failed", message=f"Could not resolve track: {e}")
 
-            try:
-                await player.connect(voice_channel)
-            except Exception as exc:
-                return PlayResult("failed", error_code="connection_failed", message=f"Could not connect to voice: {exc}")
-            player.queue.append(track)
+                if request_generation != player._playback_generation:
+                    return PlayResult("failed", error_code="cancelled", message="Song request cancelled.")
 
-            is_busy = player.has_active_track or (player.is_connected and player.voice_client.is_paused())
+                try:
+                    await player.connect(voice_channel)
+                except Exception as exc:
+                    return PlayResult("failed", error_code="connection_failed", message=f"Could not connect to voice: {exc}")
 
-            if not is_busy:
-                player.play_next()
-                if player.current is track:
-                    return PlayResult("playing", title=track.title, artist=track.artist or None)
-                if track in player.queue:
-                    if player.current is None and player.queue[0] is track:
-                        return PlayResult("starting", title=track.title, artist=track.artist or None)
-                    return PlayResult("queued", title=track.title, artist=track.artist or None,
-                                      queue_position=list(player.queue).index(track) + 1)
-                return PlayResult("failed", error_code="playback_failed", message="The track could not start playback.")
-            else:
-                position = len(player.queue)
-                logger.info("[music] queued position=%d: %s", position, track.title)
-                return PlayResult("queued", title=track.title, artist=track.artist or None, queue_position=position)
+                if request_generation != player._playback_generation:
+                    return PlayResult("failed", error_code="cancelled", message="Song request cancelled.")
+                player.queue.append(track)
+
+                is_busy = player.has_active_track or (player.is_connected and player.voice_client.is_paused())
+
+                if not is_busy:
+                    player.play_next()
+                    if player.current is track:
+                        return PlayResult("playing", title=track.title, artist=track.artist or None)
+                    if track in player.queue:
+                        if player.current is None and player.queue[0] is track:
+                            return PlayResult("starting", title=track.title, artist=track.artist or None)
+                        return PlayResult("queued", title=track.title, artist=track.artist or None,
+                                          queue_position=list(player.queue).index(track) + 1)
+                    return PlayResult("failed", error_code="playback_failed", message="The track could not start playback.")
+                else:
+                    position = len(player.queue)
+                    logger.info("[music] queued position=%d: %s", position, track.title)
+                    return PlayResult("queued", title=track.title, artist=track.artist or None, queue_position=position)
+        finally:
+            player._pending_play_requests -= 1
 
     async def queue_bulk(self, guild, requester_member, queries: list[str], text_channel=None) -> str:
         """Queue multiple songs as placeholders and resolve them in background."""
@@ -785,7 +805,8 @@ class VoiceManager:
 
     async def stop(self, guild) -> str:
         player = self.get_player(guild)
-        if not player.is_connected:
+        had_pending_request = player.has_pending_play_requests
+        if not player.is_connected and not had_pending_request:
             return "Bot is not in a voice channel."
         player._playback_generation += 1
         if player._start_when_free_task:
@@ -799,7 +820,9 @@ class VoiceManager:
             player._resolver_task = None
         player._manual_stop = True
         player.queue.clear()
-        if player.is_playing or player.voice_client.is_paused():
+        if player.is_playing or (
+            player.voice_client is not None and player.voice_client.is_paused()
+        ):
             player.voice_client.stop_playing()
         player.current = None
         player._schedule_idle_check()
