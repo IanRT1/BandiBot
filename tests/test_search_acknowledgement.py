@@ -11,6 +11,7 @@ Coverage:
 import asyncio
 import json
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -240,7 +241,7 @@ def test_interruption_cancels_search_and_acknowledgement(monkeypatch):
     (False, {"status": "starting", "title": "Get Lucky", "artist": "Daft Punk"}, ""),
     (False, {"status": "playing", "title": "The Lady Don't Mind", "artist": "Talking Heads"}, ""),
     (True, {"status": "queued", "title": "The Lady Don't Mind", "artist": "Talking Heads", "queue_position": 4}, "confirmed"),
-    (True, {"status": "playing", "title": "The Lady Don't Mind", "artist": "Talking Heads"}, ""),
+    (True, {"status": "playing", "title": "The Lady Don't Mind", "artist": "Talking Heads"}, "confirmed"),
     (False, {"status": "failed", "error_code": "resolution_failed", "message": "No matching track found."}, "confirmed"),
 ])
 def test_song_acknowledgement_depends_on_actual_outcome(
@@ -267,6 +268,7 @@ def test_song_acknowledgement_depends_on_actual_outcome(
             assert query == "The Lady Don't Mind Talking Heads"
             calls.append("searching")
             searching.set()
+            return True
 
         async def confirm(text, details, *, searching):
             assert not searching
@@ -286,3 +288,51 @@ def test_song_acknowledgement_depends_on_actual_outcome(
     asyncio.run(run())
     assert ("searching" in calls) is (not busy)
     assert ("confirmed" in calls) is bool(expected_confirmation)
+
+
+def test_song_gets_final_confirmation_when_current_track_ends_during_search(monkeypatch):
+    from music.player import voice_manager
+
+    player = SimpleNamespace(
+        has_active_track=True,
+        is_connected=True,
+        voice_client=SimpleNamespace(is_paused=lambda: False),
+    )
+    monkeypatch.setattr(voice_manager, "get_player", lambda guild: player)
+    search_started = asyncio.Event()
+    search_finished = asyncio.Event()
+    outcome = json.dumps({
+        "status": "playing",
+        "title": "Homemade Dynamite",
+        "artist": "Lorde",
+    })
+
+    async def play(*args):
+        search_started.set()
+        await search_finished.wait()
+        return outcome
+
+    confirm = AsyncMock(return_value="Playing Homemade Dynamite by Lorde.")
+    announce = AsyncMock()
+    monkeypatch.setattr(handler, "_execute_playback_tool", play)
+    monkeypatch.setattr(handler, "_song_confirmation", confirm)
+    monkeypatch.setattr(handler, "_announce_song_search", announce)
+
+    async def run():
+        request = asyncio.create_task(handler._execute_song_request(
+            {"name": "play_music", "arguments": {"query": "Homemade Dynamite Lorde"}},
+            SimpleNamespace(guild=object()),
+            "Play Homemade Dynamite by Lorde",
+        ))
+        await asyncio.wait_for(search_started.wait(), 1)
+        player.has_active_track = False
+        search_finished.set()
+        return await asyncio.wait_for(request, 1)
+
+    assert asyncio.run(run()) == (
+        outcome, "Playing Homemade Dynamite by Lorde."
+    )
+    announce.assert_not_awaited()
+    confirm.assert_awaited_once_with(
+        "Play Homemade Dynamite by Lorde", outcome, searching=False
+    )

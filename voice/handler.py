@@ -229,20 +229,21 @@ def _looks_like_spanish(text: str) -> bool:
 
 
 async def _announce_song_search(guild, text: str, query: str, playback_task):
-    """Speak the request acknowledgement even if playback starts during generation."""
+    """Speak the request acknowledgement and report whether it was delivered."""
     from voice.listener import voice_listener_manager
     from voice.tts import speak
     from core.interaction_logging import log_message
 
     session = voice_listener_manager.get_session(guild)
     if not session or not session._voice_client or not session._voice_client.is_connected():
-        return
+        return False
     acknowledgement = await _song_confirmation(text, query, searching=True)
     if not acknowledgement:
-        return
+        return False
     logger.debug("[voice] song search acknowledgement ready; starting TTS")
     log_message(logger, "voice", "bot", "BandiBot", acknowledgement)
     await speak(session._voice_client, acknowledgement, guild=guild, clip_buffer=session.clip_buffer)
+    return True
 
 
 async def _execute_song_request(tool_call, proxy, text: str) -> tuple[str, str]:
@@ -259,13 +260,14 @@ async def _execute_song_request(tool_call, proxy, text: str) -> tuple[str, str]:
         ))
     try:
         result = await playback_task
+        acknowledgement_spoken = False
         if acknowledgement_task:
             try:
-                await acknowledgement_task
+                acknowledgement_spoken = bool(await acknowledgement_task)
             except Exception as exc:
                 logger.debug("[voice] song search acknowledgement failed: %s", exc)
         outcome = json.loads(result)
-        if outcome["status"] in {"playing", "starting"}:
+        if outcome["status"] in {"playing", "starting"} and acknowledgement_spoken:
             return result, ""
         return result, await _song_confirmation(text, result, searching=False)
     finally:

@@ -2,7 +2,7 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 
 @pytest.mark.parametrize("new_state", ["waiting", "listening", "processing"])
@@ -112,6 +112,32 @@ def test_stt_timeout_resets_voice_state(monkeypatch):
 
     assert user_state.reset_calls >= 1
     assert session._pipeline_task is None
+
+
+def test_listener_start_does_not_reuse_disconnected_voice_client(monkeypatch):
+    import voice.listener as listener
+
+    async def run():
+        stale = SimpleNamespace(is_connected=lambda: False)
+        replacement = SimpleNamespace(is_connected=lambda: True)
+        connect = AsyncMock(return_value=replacement)
+        guild = SimpleNamespace(name="Test", voice_client=stale)
+        channel = SimpleNamespace(guild=guild, connect=connect)
+        session = object.__new__(listener.GuildVoiceSession)
+        session.guild = guild
+        session.clip_buffer = SimpleNamespace(start=Mock())
+        session._connection_watchdog_task = None
+        monkeypatch.setattr(listener, "BandiBotSink", lambda _: object())
+        session._start_receiving = AsyncMock()
+
+        await session.start(channel)
+        session._connection_watchdog_task.cancel()
+        await asyncio.gather(session._connection_watchdog_task, return_exceptions=True)
+
+        connect.assert_awaited_once_with(cls=listener.voice_recv.VoiceRecvClient)
+        assert session._voice_client is replacement
+
+    asyncio.run(run())
 
 
 def test_interrupted_speech_logs_usage_and_passes_prior_interruption(monkeypatch, caplog):

@@ -506,7 +506,7 @@ The tests cover:
   cancellation behavior
 - Private context separation and ignored test-cache directories
 
-The suite currently contains **142 tests**. The only expected warning is Python's
+The suite currently contains **143 tests**. The only expected warning is Python's
 `audioop` deprecation warning from the Discord dependency.
 
 For a local syntax check, compile the edited modules with:

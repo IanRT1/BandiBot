@@ -688,8 +688,8 @@ class GuildVoiceSession:
 
     async def start(self, voice_channel: discord.VoiceChannel):
         self.sink = BandiBotSink(self)
-        existing  = voice_channel.guild.voice_client
-        if existing:
+        existing = voice_channel.guild.voice_client
+        if existing and existing.is_connected():
             self._voice_client = existing
         else:
             self._voice_client = await voice_channel.connect(cls=voice_recv.VoiceRecvClient)
@@ -770,7 +770,7 @@ class GuildVoiceSession:
                 if time.time() - last_reset > 600:
                     self._oww_model.reset()
                     last_reset = time.time()
-                    logger.info("[voice] reset wake word model state")
+                    logger.debug("[voice] reset wake word model state")
 
                 player = voice_manager.get_player(self.guild)
                 music_active = player.is_playing or bool(player.queue) or (
