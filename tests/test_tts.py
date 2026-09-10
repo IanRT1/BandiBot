@@ -55,6 +55,38 @@ def test_promoted_speech_cancellation_keeps_music_and_completion_callback():
     assert completed == [None]
 
 
+def test_promoted_speech_finishes_when_music_source_ends_early():
+    import numpy as np
+    from voice.tts_sources import MixerSource, StandaloneSource, DISCORD_FRAME_SIZE
+
+    class EarlyEndingMusic:
+        def __init__(self):
+            self.reads = 0
+
+        def cleanup(self):
+            pass
+
+        def read(self):
+            self.reads += 1
+            if self.reads == 1:
+                return np.full(DISCORD_FRAME_SIZE // 2, 1000, dtype=np.int16).tobytes()
+            return b""
+
+    source = StandaloneSource()
+    mixer = MixerSource(EarlyEndingMusic())
+    source.feed(np.full(DISCORD_FRAME_SIZE // 2, 2000, dtype=np.int16).tobytes())
+    assert source.attach_music(mixer, lambda error: None)
+    source.set_done()
+
+    assert source.read()  # The one music frame plus the start of speech.
+    assert source.read()  # Speech continues over silence after music dies.
+    assert source.read()  # The final buffered speech frame is not truncated.
+    assert source._finished_evt.is_set()
+    assert source.read() == b""
+    assert mixer.primary_exhausted
+    assert mixer.primary_elapsed_seconds == pytest.approx(0.02)
+
+
 def test_exhausted_standalone_cannot_accept_music():
     from voice.tts_sources import StandaloneSource
 

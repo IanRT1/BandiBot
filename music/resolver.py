@@ -19,7 +19,8 @@ Search ranking:
   and remaster uploads. Unrequested music videos are penalized because they can
   include intros, outros, or visual-only content; video results are favored when
   the user explicitly asks for a video. Live/remix/cover/slowed/etc. results are
-  penalized unless the user explicitly asked for that variant.
+  penalized unless the user explicitly asked for that variant. Alternate tuning
+  uploads such as 432Hz versions receive the same treatment.
 
 Playlist behavior:
   Playlist entries are intentionally not fully resolved here. They enter the
@@ -140,6 +141,9 @@ _BOOTLEG_DATE_RE = re.compile(
     r")\s+\d{1,2},?\s+\d{4}\b",
     re.IGNORECASE,
 )
+
+_ALTERNATE_TUNING_RE = re.compile(r"\b\d{3,4}(?:\.\d+)?\s*hz\b", re.IGNORECASE)
+_ALTERNATE_TUNING_PENALTY = 18
 
 _BOOTLEG_LOCATION_WORDS = (
     "san francisco", "los angeles", "new york", "london", "paris",
@@ -721,6 +725,9 @@ def _score_result(entry: dict, query_lower: str) -> int:
         if _contains_phrase(title, phrase) and not _variant_requested(phrase, requested_variants):
             score += penalty
 
+    if _has_unrequested_alternate_tuning(title, query_lower):
+        score -= _ALTERNATE_TUNING_PENALTY
+
     candidate_text = f"{title} {uploader}"
     for phrase, penalty in _NON_SONG_PENALTIES.items():
         if _contains_phrase(candidate_text, phrase) and not _contains_phrase(query_lower, phrase):
@@ -769,6 +776,9 @@ def _has_unrequested_bad_markers(entry: dict, query_lower: str) -> bool:
         if _contains_phrase(candidate_text, phrase) and not _contains_phrase(query_lower, phrase):
             return True
 
+    if _has_unrequested_alternate_tuning(title, query_lower):
+        return True
+
     if not _variant_requested("live", requested_variants):
         if _BOOTLEG_DATE_RE.search(title):
             return True
@@ -776,6 +786,22 @@ def _has_unrequested_bad_markers(entry: dict, query_lower: str) -> bool:
             return True
 
     return False
+
+
+def _has_unrequested_alternate_tuning(title: str, query_lower: str) -> bool:
+    """Return whether a result advertises an audio tuning absent from the request."""
+    candidate_tunings = {
+        re.sub(r"\s+", "", match.group(0).lower())
+        for match in _ALTERNATE_TUNING_RE.finditer(title)
+    }
+    if not candidate_tunings:
+        return False
+
+    requested_tunings = {
+        re.sub(r"\s+", "", match.group(0).lower())
+        for match in _ALTERNATE_TUNING_RE.finditer(query_lower)
+    }
+    return not candidate_tunings.issubset(requested_tunings)
 
 
 def _tokens(text: str) -> list[str]:

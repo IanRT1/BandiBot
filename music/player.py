@@ -489,6 +489,8 @@ class GuildPlayer:
                 return
             finished_track = self.current
             elapsed = self.elapsed_seconds if finished_track else 0.0
+            if mixer_source.primary_exhausted:
+                elapsed = mixer_source.primary_elapsed_seconds
             stderr_text = _read_ffmpeg_stderr(ffmpeg_source)
             if error:
                 logger.error(f"Playback error in {self.guild.name}: {error}")

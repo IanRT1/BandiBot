@@ -36,6 +36,44 @@ def test_resolver_prefers_studio_or_remaster_over_unrequested_video():
     assert _score_result(remaster, query) > _score_result(video, query)
 
 
+def test_resolver_penalizes_unrequested_alternate_tuning():
+    from music.resolver import _has_unrequested_bad_markers, _score_result
+
+    query = "stay up late talking heads"
+    alternate_tuning = {
+        "title": "Talking Heads - Stay Up Late 2005 Remaster 432Hz",
+        "uploader": "MrGoodToons",
+        "duration": 224,
+    }
+    official_video = {
+        "title": "Talking Heads - Stay Up Late (Official Video)",
+        "uploader": "Talking Heads",
+        "duration": 224,
+    }
+
+    assert _score_result(official_video, query) > _score_result(alternate_tuning, query)
+    assert _has_unrequested_bad_markers(alternate_tuning, query)
+
+
+def test_resolver_allows_explicit_alternate_tuning_request():
+    from music.resolver import _has_unrequested_bad_markers, _score_result
+
+    alternate_tuning = {
+        "title": "Talking Heads - Stay Up Late 2005 Remaster 432 Hz",
+        "uploader": "MrGoodToons",
+        "duration": 224,
+    }
+
+    ordinary_score = _score_result(alternate_tuning, "stay up late talking heads")
+    requested_score = _score_result(alternate_tuning, "stay up late talking heads 432hz")
+
+    assert requested_score > ordinary_score
+    assert not _has_unrequested_bad_markers(
+        alternate_tuning,
+        "stay up late talking heads 432hz",
+    )
+
+
 def test_explicit_video_request_does_not_penalize_official_video():
     from music.resolver import _score_result
 

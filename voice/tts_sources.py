@@ -47,6 +47,8 @@ class MixerSource(discord.AudioSource):
 
     def __init__(self, primary: discord.AudioSource, clip_buffer=None):
         self._primary = primary
+        self._primary_frames_read = 0
+        self._primary_exhausted = False
         self._duck_gain = 1.0
         self._tts_buf = bytearray()
         self._tts_done = False
@@ -59,7 +61,18 @@ class MixerSource(discord.AudioSource):
     def read(self) -> bytes:
         music_frame = self._primary.read()
         if not music_frame:
-            return b""
+            self._primary_exhausted = True
+            # A newly resolved track can fail just after it is promoted under
+            # standalone speech. Keep Discord's source alive with silence long
+            # enough to drain that speech; the music callback will then retry
+            # the failed stream without cutting off the confirmation.
+            with self._lock:
+                speech_pending = self._tts_active or bool(self._tts_buf)
+            if not speech_pending:
+                return b""
+            music_frame = bytes(DISCORD_FRAME_SIZE)
+        else:
+            self._primary_frames_read += 1
 
         music = np.frombuffer(music_frame, dtype=np.int16).astype(np.int32)
 
@@ -95,6 +108,14 @@ class MixerSource(discord.AudioSource):
             self._clip_buffer.append(np.frombuffer(frame, dtype=np.int16).copy())
 
         return frame
+
+    @property
+    def primary_exhausted(self) -> bool:
+        return self._primary_exhausted
+
+    @property
+    def primary_elapsed_seconds(self) -> float:
+        return self._primary_frames_read * 0.02
 
     def feed_tts(self, pcm_mono: bytes):
         if not pcm_mono:
