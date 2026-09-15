@@ -97,10 +97,10 @@ Discord Gateway
       │                   ├── LLM (bot/openai_client.py)
       │                   ├── Local lore RAG (bot/retrieval.py)
       │                   ├── Tool schemas (bot/tool_schemas.py)
-      │                   └── Tool execution (bot/tool_executor.py)
-      │                             ├── music/player.py (VoiceManager)
-      │                             ├── voice/listener.py / voice/clips.py
-      │                             └── bot/handlers.py + bot/utils.py (server context)
+      │                   └── Shared execution (bot/interactions.py)
+      │                             └── Tool execution (bot/tool_executor.py)
+      │                                       ├── music/player.py (VoiceManager)
+      │                                       └── bot/utils.py (server context)
       │
       └── on_voice_state_update
                 └── voice/listener.py (GuildVoiceSession)
@@ -117,13 +117,13 @@ Discord Gateway
 
 ### Key Design Decisions
 
-**One audio output owner** — `voice/output.py` mixes independent music, speech, and activation inputs. Speech ducks music and remains audible while music is paused. Cancellation discards buffered and late speech frames without stopping music.
+**One audio output owner** — `voice/output.py` mixes music, speech, and activation audio. Speech ducks music, and cancellation clears speech without stopping music.
 
-**Placeholder queue with one-ahead resolution** — bulk queued songs appear instantly in the queue. The background resolver pre-loads only the next track while the current one plays, then triggers the next resolution when the song changes. Respectful of YouTube's API and accurate to actual queue state.
+**Responsive queueing** — bulk requests appear immediately and resolve in the background. Queue state is owned by `music/player.py`; bounded workers prepare requests and commit results in order.
 
-**Interruption system across async and audio threads** — wake word detection runs on the audio thread. When it fires mid-TTS, `cancel_tts()` immediately clears the TTS buffer, and `_interrupt_current()` cancels the asyncio pipeline task. Accepted music operations outlive the interrupted conversation task; an explicit stop invalidates pending commits. Operation IDs, queue revisions, and playback generations prevent duplicate or stale actions.
+**Voice interruption and recovery** — wake-word detection can interrupt speech and the active command pipeline. Accepted music operations can finish independently, while stop and reconnect handling protect queue and playback state.
 
-**Per-user state machines** — each user in the voice channel has independent wake word detection, VAD state, and capture buffers. Packet loss or bad audio from one user does not affect others.
+**Per-user voice state** — each speaker has independent wake-word detection, VAD state, and capture buffers.
 
 **Music starts voice listening** — when a text command makes the bot join voice for music playback, `music/player.py` explicitly starts the wake-word listener on the same voice client. The Discord voice-state event remains a fallback for joins that did not originate in the command path, while the listener manager serializes lifecycle operations and avoids competing sessions.
 
@@ -135,49 +135,15 @@ order. Stable entry IDs and session/attempt checks protect reconnect recovery.
 actions through the same boundary. Music receipts come from actual results;
 voice uses short status confirmations and Discord retains full metadata.
 
-**Song identity before ranking** — single-song tools supply structured title,
-artist, version, or exact-source fields. `music/requests.py` builds resolver
-input without deleting title words. If extraction omits the title, it searches the
-original request instead of only the artist. A failed single-song search gets one
-recovery attempt using the original title words and phonetic artist correction;
-recovered candidates are checked against the original request. Successful searches
-keep their normal path. Unsupported matches get a brief clarification, not a menu
-of unrelated results. Interpretation remains
-probabilistic; operation deduplication is process-local, not durable across crashes.
+**Song identity checks** — structured song details and recovery searches help avoid playing unrelated results. Interpretation can still be ambiguous.
 
 **Private deployment context** — personal instructions and server lore are ignored by Git. Generic `.example.txt` templates are tracked and used automatically when the private files are absent.
 
-**Hybrid local RAG for server lore** — server-lore files are split into sections
-and searched locally before the LLM request. BM25/fuzzy matching protects
-server-specific names and speech-to-text corrections, while a cached
-multilingual embedding model recovers paraphrased questions. Document-chunk
-embeddings are precomputed and reused, so each query only embeds the question.
-The top three matches are ranked together and capped before being added to the
-prompt. Strong matches omit the redundant `get_server_info` tool so the answer
-uses one LLM call; weak matches keep the tool available as a fallback. The
-embedding model is loaded lazily and the system degrades to BM25 retrieval if
-it is unavailable. Parent section labels, conservative singular/plural
-matching, corpus-derived BM25 weighting, and evidence requirements for names,
-headings, or multiple terms improve broad questions without hardcoded language
-lists or private server names. Live Discord facts such as server creation date
-remain structured context.
+**Local lore retrieval** — server lore is searched locally before relevant sections are added to an LLM request. If no match is found, the full private file is not sent as a fallback. Live Discord facts remain structured context.
 
-The retriever normalizes accents and tolerates conservative speech-to-text
-spelling variations for names. If no lore matches, the full private file is
-not sent as a fallback; the bot reports that the fact is not documented instead
-of guessing.
+**Shared tool execution** — text and voice commands use the same tool executor and music result reporting.
 
-Short follow-up questions inherit the latest user question for retrieval, so a
-sequence such as "Who created BandiBot?" followed by "When?" can retrieve the
-same focused lore section without storing permanent conversation memory.
-
-**Shared tool execution** — text and voice commands use the same tool executor.
-Music intent rules distinguish skipping the currently playing song from deleting
-an upcoming queue item, including Spanish phrasing such as `quitar la canción`.
-
-**Voice receive recovery** — bursts of Discord crypto/decryption failures are
-grouped into one warning and trigger a receive-sink restart, while unrelated
-voice processing errors remain visible individually.
+**Voice receive recovery** — bursts of Discord crypto/decryption failures are grouped into one warning and trigger a receive-sink restart.
 
 **Voice connection recovery** — the listener watchdog waits through short-lived
 Discord reconnects, then force-closes a stale voice client and retries a fresh
@@ -186,9 +152,7 @@ stale client, restores the interrupted track to the front of the queue, and
 resumes playback on the replacement client. This is separate from the main
 Discord gateway retry loop.
 
-**Structured music outcomes** — `music/results.py` represents play success,
-queueing, startup, and failure as structured data. Text and voice confirmations
-therefore use the actual playback result instead of parsing display strings.
+**Structured music outcomes** — text and voice confirmations use actual playback results.
 
 ---
 
@@ -201,6 +165,10 @@ therefore use the actual playback result instead of parsing display strings.
 - espeak-ng installed and available in `PATH` when using the default Kokoro TTS provider
 
 ### Python Dependencies
+
+Python 3.11 or newer is required. On Python 3.13+, the package installs
+`audioop-lts` for compatibility with audio dependencies that still use the
+removed standard-library `audioop` module.
 
 Runtime dependencies are declared in `pyproject.toml` and installed with the package:
 
@@ -250,7 +218,7 @@ ffmpeg -version
 
 ### espeak-ng
 
-The default provider is Kokoro. Kokoro requires `espeak-ng` as a system dependency. If you select ElevenLabs or Deepgram, the corresponding API key is required for remote synthesis; Kokoro remains the automatic fallback.
+The default provider is Kokoro. Kokoro requires `espeak-ng` as a system dependency. Remote providers may fall back to Kokoro if they fail before sending any audio; after partial audio, synthesis fails rather than repeating speech. ElevenLabs requires its API key; Deepgram TTS uses the required Deepgram key.
 
 Verify installation:
 ```bash
@@ -346,9 +314,9 @@ KOKORO_LANG=e
 KOKORO_SPEED=1.1
 
 # Optional writable locations when running outside the source checkout.
-# Defaults to the current working directory and its data/ and logs/ folders.
-# BANDIBOT_RUNTIME_DIR=C:/Users/you/BandiBot
-# BANDIBOT_DATA_DIR=C:/Users/you/BandiBot/data
+# Runtime root sets config.toml and logs; default is the current directory.
+# BANDIBOT_RUNTIME_DIR=C:/Users/you/BandiBot  # config.toml and logs
+# BANDIBOT_DATA_DIR=C:/Users/you/BandiBot/data  # private context files
 ```
 
 Music work limits and logging are configured in [`config.toml`](config.toml),
@@ -394,7 +362,7 @@ Provide your wake word text (e.g. "BandiBot"), let it generate synthetic samples
 
 ### Tuning Detection
 
-Adjust the following constants in `voice/listener.py` to tune detection:
+These are code constants in `voice/listener.py`, not `.env` or `config.toml` settings. Edit them and restart to tune detection:
 
 | Constant | Default | Description |
 |---|---|---|
@@ -469,20 +437,7 @@ BandiBot/
 │   ├── instructions.example.txt  # Generic tracked prompt template
 │   └── server_info.example.txt   # Generic tracked server-context template
 │
-├── tests/
-│   ├── test_retrieval.py           # Local RAG and lore fallback tests
-│   ├── test_music_tools.py         # Music intent and tool safety tests
-│   ├── test_music_player.py        # Playback race and queue restoration tests
-│   ├── test_playback_recovery.py    # Stop, reconnect, and late-callback races
-│   ├── test_interaction_logging.py # Privacy and usage logging tests
-│   ├── test_instance_lock.py         # Single-process guard tests
-│   ├── test_preflight.py            # Startup validation tests
-│   ├── test_runtime_shutdown.py     # Voice/music cleanup tests
-│   ├── test_search_acknowledgement.py # Voice search/playing acknowledgements
-│   ├── test_session_logs.py          # Current/previous log rotation tests
-│   ├── test_tts.py                 # TTS providers, conversion, and fallback
-│   ├── test_voice_timeouts.py      # STT/LLM timeout state recovery
-│   └── test_repository_hygiene.py  # Private files and cache ignore rules
+├── tests/                  # Offline tests for commands, music, voice, logging, and packaging
 │
 ├── scripts/
 │   └── check_wheel.py      # Installed-wheel contents and entry-point check
@@ -536,10 +491,10 @@ The suite includes structured song inputs, operation cancellation, audio output,
 capability gating, and configuration validation. The only expected warning is Python's
 `audioop` deprecation warning from the Discord dependency.
 
-For a local syntax check, compile the edited modules with:
+For a local syntax check, compile edited modules, for example:
 
 ```powershell
-python -m py_compile core/client.py music/player.py voice/handler.py voice/listener.py
+python -m compileall -q bot core music voice
 ```
 
 CI runs on Windows and Linux with Python 3.11. It also builds the wheel,
