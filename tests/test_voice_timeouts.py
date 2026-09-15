@@ -238,16 +238,20 @@ def test_crypto_packet_log_filter_suppresses_individual_events_and_reports_burst
             (),
             None,
         )
-        for _ in range(5)
+        for _ in range(31)
     ]
 
     with caplog.at_level(logging.WARNING, logger="voice.listener"):
-        results = [packet_filter.filter(record) for record in records]
+        results = [packet_filter.filter(record) for record in records[:30]]
+        assert not [
+            record for record in caplog.records if "packet decryption errors" in record.message
+        ]
+        results.append(packet_filter.filter(records[30]))
 
-    assert results == [False] * 5
+    assert results == [False] * 31
     warnings = [record for record in caplog.records if "packet decryption errors" in record.message]
     assert len(warnings) == 1
-    assert "5 Discord voice packet decryption errors" in warnings[0].message
+    assert "31 Discord voice packet decryption errors in 300s" in warnings[0].message
 
 
 def test_crypto_packet_log_filter_reports_again_after_quiet_window(caplog):
@@ -270,10 +274,10 @@ def test_crypto_packet_log_filter_reports_again_after_quiet_window(caplog):
         )
 
     with caplog.at_level(logging.WARNING, logger="voice.listener"):
-        for _ in range(5):
+        for _ in range(31):
             packet_filter.filter(record())
-        current_time[0] = 11.0
-        for _ in range(5):
+        current_time[0] = 301.0
+        for _ in range(31):
             packet_filter.filter(record())
 
     warnings = [record for record in caplog.records if "packet decryption errors" in record.message]

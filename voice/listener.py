@@ -65,8 +65,8 @@ class _CryptoPacketLogFilter(logging.Filter):
     """Collapse Discord voice crypto packet errors into one burst warning."""
 
     MESSAGE = "CryptoError decoding packet data"
-    WINDOW_SECONDS = 10.0
-    BURST_THRESHOLD = 5
+    WINDOW_SECONDS = 5 * 60.0
+    BURST_THRESHOLD = 30
 
     def __init__(self, clock=time.monotonic):
         super().__init__()
@@ -86,7 +86,7 @@ class _CryptoPacketLogFilter(logging.Filter):
             self._reported = False
         self._events.append(now)
 
-        if len(self._events) >= self.BURST_THRESHOLD and not self._reported:
+        if len(self._events) > self.BURST_THRESHOLD and not self._reported:
             logger.warning(
                 "[voice] %d Discord voice packet decryption errors in %.0fs; "
                 "possible voice connection instability",
@@ -149,20 +149,6 @@ CLIP_SPEECH_RMS_FLOOR = 0.008
 CLIP_MAX_GAIN = 3.2
 CLIP_MIN_GAIN = 0.5
 CLIP_RMS_SMOOTHING = 0.12
-
-_PLAYBACK_COMMAND_RE = re.compile(
-    r"\b("
-    r"play|queue|add|put\s+on|"
-    r"pon|ponme|reproduce|toca|"
-    r"skip|next|pause|resume|stop"
-    r")\b",
-    re.IGNORECASE,
-)
-
-
-def _looks_like_playback_command(text: str) -> bool:
-    return bool(_PLAYBACK_COMMAND_RE.search(text or ""))
-
 
 class RollingClipBuffer:
     """Timestamped 48kHz stereo clip timeline.
@@ -581,7 +567,6 @@ class GuildVoiceSession:
         self._monitor_task: Optional[asyncio.Task] = None
         self._interrupted_pipeline_uids: set[int] = set()
         self._speech_interrupted_for: set[int] = set()
-        self._protected_pipeline_tasks: set[asyncio.Task] = set()
 
         logger.debug(f"[voice] ready in {guild.name} | model: {self._oww_model_name}")
 
@@ -609,19 +594,9 @@ class GuildVoiceSession:
         if not self._voice_client or not self._voice_client.is_connected():
             return False
 
-        from voice.tts_sources import MixerSource, StandaloneSource
-
-        standalone = getattr(self._voice_client, "_standalone_tts", None)
-        if isinstance(standalone, StandaloneSource):
-            return not standalone._finished_evt.is_set() and not standalone.is_cancelled()
-
-        source = getattr(self._voice_client, "source", None)
-        source = getattr(source, "mixer", None) or source
-        if isinstance(source, MixerSource):
-            with source._lock:
-                return source._tts_active or bool(source._tts_buf)
-
-        return False
+        from voice.output import existing_output
+        output = existing_output(self._voice_client)
+        return bool(output and output.source.speech and not output.source.speech.finished.is_set())
 
     async def _interrupt_current(self, next_uid: int | None = None):
         """Cancel any in-progress TTS immediately."""
@@ -634,9 +609,8 @@ class GuildVoiceSession:
             self._monitor_task = None
         pipeline_task = self._pipeline_task
         if pipeline_task and not pipeline_task.done():
-            if pipeline_task not in self._protected_pipeline_tasks:
-                pipeline_task.cancel()
-                self._pipeline_task = None
+            pipeline_task.cancel()
+            self._pipeline_task = None
         self._pipeline_is_music = False
         logger.debug("[voice] ← interrupted current pipeline")
 
@@ -761,6 +735,7 @@ class GuildVoiceSession:
             pass
 
     async def _idle_loop(self):
+        from voice.output import music_paused
         from music.player import voice_manager
         last_reset = time.time()
         try:
@@ -774,7 +749,7 @@ class GuildVoiceSession:
 
                 player = voice_manager.get_player(self.guild)
                 music_active = player.is_playing or bool(player.queue) or (
-                    player.is_connected and player.voice_client and player.voice_client.is_paused()
+                    player.is_connected and player.voice_client and music_paused(player.voice_client)
                 )
                 if music_active:
                     self._last_activity = time.time()
@@ -884,6 +859,7 @@ class GuildVoiceSession:
             current_task = asyncio.current_task()
             interaction_start = time.perf_counter()
             completion_status = "failed"
+            should_leave = False
             try:
                 try:
                     text = await asyncio.wait_for(
@@ -907,11 +883,6 @@ class GuildVoiceSession:
                 log_message(logger, "voice", "user", clean_username(getattr(member, "nick", None), member.name), text)
                 session.add("user", text)
                 t = time.perf_counter()
-                likely_playback = _looks_like_playback_command(text)
-                if likely_playback:
-                    self._pipeline_is_music = True
-                    if current_task:
-                        self._protected_pipeline_tasks.add(current_task)
                 try:
                     response_text, should_leave = await asyncio.wait_for(
                         handle_voice_command(
@@ -960,11 +931,6 @@ class GuildVoiceSession:
                         )
                         cancel_tts(self._voice_client)
                         return
-                    if should_leave:
-                        await asyncio.sleep(1)
-                        logger.info("[voice] → leaving voice channel")
-                        await voice_listener_manager.stop_listening(self.guild)
-                        await voice_manager.get_player(self.guild).disconnect()
                 else:
                     logger.debug(f"[voice] music command pipeline completed in {elapsed:.0f}ms | final_reply=no")
 
@@ -977,13 +943,15 @@ class GuildVoiceSession:
             except Exception as e:
                 logger.error(f"[voice] pipeline error: {e}")
             finally:
+                if should_leave:
+                    # Delivery failure or cancellation must not strand a leave command.
+                    await voice_manager.get_player(self.guild).disconnect()
+                    await voice_listener_manager.stop_listening(self.guild)
                 log_done(logger, "voice", (time.perf_counter() - interaction_start) * 1000, completion_status)
                 self._interrupted_pipeline_uids.discard(uid)
-                if current_task:
-                    self._protected_pipeline_tasks.discard(current_task)
                 if self._pipeline_task is current_task:
-                    # A protected music request can finish after a repeated
-                    # wake word starts another capture. Only release processing
+                    # An old interaction can finish after a repeated wake word
+                    # starts another capture. Only release processing
                     # state still owned by this task; never reset that capture
                     # or a newer pipeline's state.
                     if self.sink:
@@ -1003,12 +971,18 @@ class VoiceListenerManager:
     def __init__(self):
         self._sessions: dict[int, GuildVoiceSession] = {}
         self._lifecycle_lock = asyncio.Lock()
+        self._closing = False
+
+    def begin_shutdown(self):
+        self._closing = True
 
     def get_session(self, guild: discord.Guild) -> Optional[GuildVoiceSession]:
         return self._sessions.get(guild.id)
 
     async def start_listening(self, guild, voice_channel, client, loop):
         async with self._lifecycle_lock:
+            if self._closing:
+                return None
             if not VOICE_ENABLED:
                 logger.info("[voice] disabled — skipping")
                 return None
@@ -1028,9 +1002,11 @@ class VoiceListenerManager:
             await session.start(voice_channel)
             return session
 
-    async def stop_listening(self, guild):
+    async def stop_listening(self, guild, *, expected_session=None):
         async with self._lifecycle_lock:
             if not VOICE_ENABLED:
+                return
+            if expected_session is not None and self._sessions.get(guild.id) is not expected_session:
                 return
             session = self._sessions.pop(guild.id, None)
             if session:
@@ -1039,6 +1015,8 @@ class VoiceListenerManager:
     async def recover(self, guild, failed_session: GuildVoiceSession):
         """Replace a voice session after a sustained connection failure."""
         async with self._lifecycle_lock:
+            if self._closing:
+                return
             if self._sessions.get(guild.id) is not failed_session:
                 return
 
@@ -1098,6 +1076,7 @@ class VoiceListenerManager:
 
     async def shutdown(self):
         """Stop all active voice listener sessions during process shutdown."""
+        self.begin_shutdown()
         async with self._lifecycle_lock:
             sessions = list(self._sessions.items())
             self._sessions.clear()

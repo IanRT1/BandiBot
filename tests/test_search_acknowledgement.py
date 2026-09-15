@@ -18,104 +18,11 @@ import pytest
 from voice import handler
 
 
-@pytest.mark.parametrize("text", ["Stop!", "stop", "¡Para!", "Detente."])
-@pytest.mark.parametrize("queued", [False, True])
-def test_bare_stop_controls_music_after_interrupted_acknowledgement(monkeypatch, text, queued):
-    from unittest.mock import AsyncMock
-    from music.player import voice_manager
-
-    player = SimpleNamespace(current=None if queued else object(),
-                             queue=[object()] if queued else [], text_channel=None)
-    monkeypatch.setattr(voice_manager, "get_player", lambda guild: player)
-    execute = AsyncMock(return_value="Stopped and cleared the queue.")
+def test_pending_song_never_announces_playing_or_calls_model(monkeypatch):
     model = AsyncMock()
-    monkeypatch.setattr(handler, "execute_tool_call", execute)
     monkeypatch.setattr(handler, "send_to_openai", model)
-    result = asyncio.run(handler.handle_voice_command(
-        text, SimpleNamespace(name="Ian", nick=None), object(), object(), [],
-        speech_was_interrupted=True,
-    ))
-    assert result == ("Stopped and cleared the queue.", False)
-    execute.assert_awaited_once()
-    assert execute.call_args.args[0] == {"name": "stop_music", "arguments": {}}
-    assert execute.call_args.args[1].content == text
+    assert asyncio.run(handler._song_confirmation("Play a song", "song", searching=True)) == ""
     model.assert_not_awaited()
-
-
-def test_bare_stop_controls_an_in_progress_song_request(monkeypatch):
-    from unittest.mock import AsyncMock
-    from music.player import voice_manager
-
-    player = SimpleNamespace(
-        current=None, queue=[], text_channel=None, has_pending_play_requests=True
-    )
-    monkeypatch.setattr(voice_manager, "get_player", lambda guild: player)
-    execute = AsyncMock(return_value="Stopped and cleared the queue.")
-    model = AsyncMock()
-    monkeypatch.setattr(handler, "execute_tool_call", execute)
-    monkeypatch.setattr(handler, "send_to_openai", model)
-
-    result = asyncio.run(handler.handle_voice_command(
-        "Stop!", SimpleNamespace(name="Ian", nick=None), object(), object(), []
-    ))
-
-    assert result == ("Stopped and cleared the queue.", False)
-    execute.assert_awaited_once()
-    model.assert_not_awaited()
-
-
-def test_song_acknowledgement_is_spoken_when_resolution_finishes_first(monkeypatch):
-    from unittest.mock import AsyncMock
-    from voice.listener import voice_listener_manager
-    import voice.tts as tts
-
-    client = SimpleNamespace(is_connected=lambda: True)
-    session = SimpleNamespace(_voice_client=client, clip_buffer=None)
-    monkeypatch.setattr(voice_listener_manager, "get_session", lambda guild: session)
-    monkeypatch.setattr(handler, "_song_confirmation", AsyncMock(return_value="Reproduciendo Trains de Porcupine Tree."))
-    speak = AsyncMock()
-    monkeypatch.setattr(tts, "speak", speak)
-
-    async def run():
-        task = asyncio.create_task(asyncio.sleep(0))
-        await task
-        await handler._announce_song_search(object(), "Play Trains", "Trains Porcupine Tree", task)
-
-    asyncio.run(run())
-    speak.assert_awaited_once()
-    assert speak.call_args.args[1] == "Reproduciendo Trains de Porcupine Tree."
-
-
-def test_song_search_acknowledgement_requests_minimal_playing_status(monkeypatch):
-    async def generate(payload):
-        instruction = payload["messages"][0]["content"]
-        assert "Respond in English" in instruction
-        assert "Do not say you are searching" in instruction
-        assert "Do not use Portuguese" in instruction
-        assert "Keep it minimal" in instruction
-        return {"choices": [{"message": {"content": "Reproduciendo Trains de Porcupine Tree."}}]}
-
-    monkeypatch.setattr(handler, "send_to_openai", generate)
-    result = asyncio.run(handler._song_confirmation(
-        "Play Trains by Porcupine Tree.",
-        "Trains Porcupine Tree",
-        searching=True,
-    ))
-    assert result == "Reproduciendo Trains de Porcupine Tree."
-
-
-def test_song_search_acknowledgement_selects_spanish_for_spanish_request(monkeypatch):
-    async def generate(payload):
-        assert "Respond in Spanish" in payload["messages"][0]["content"]
-        return {"choices": [{"message": {"content": "Reproduciendo Trains."}}]}
-
-    monkeypatch.setattr(handler, "send_to_openai", generate)
-    result = asyncio.run(handler._song_confirmation(
-        "Reproduce Trains de Porcupine Tree.",
-        "Trains Porcupine Tree",
-        searching=True,
-    ))
-    assert result == "Reproduciendo Trains."
 
 
 def test_voice_model_receives_stop_context_and_live_search(monkeypatch):
@@ -124,7 +31,7 @@ def test_voice_model_receives_stop_context_and_live_search(monkeypatch):
     monkeypatch.setattr(handler, "_build_voice_context", lambda *args: ("context", True))
     monkeypatch.setattr(handler, "build_instruction", lambda **kwargs: "instructions")
     monkeypatch.setattr(voice_manager, "get_player", lambda guild: SimpleNamespace(
-        current=SimpleNamespace(paused_at=None), queue=[],
+        current=SimpleNamespace(paused_at=None, title="Existing song"), queue=[],
     ))
 
     async def generate(payload, tools=None):
@@ -237,57 +144,21 @@ def test_interruption_cancels_search_and_acknowledgement(monkeypatch):
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("busy, outcome, expected_confirmation", [
-    (False, {"status": "starting", "title": "Get Lucky", "artist": "Daft Punk"}, ""),
-    (False, {"status": "playing", "title": "The Lady Don't Mind", "artist": "Talking Heads"}, ""),
-    (True, {"status": "queued", "title": "The Lady Don't Mind", "artist": "Talking Heads", "queue_position": 4}, "confirmed"),
-    (True, {"status": "playing", "title": "The Lady Don't Mind", "artist": "Talking Heads"}, "confirmed"),
-    (False, {"status": "failed", "error_code": "resolution_failed", "message": "No matching track found."}, "confirmed"),
+@pytest.mark.parametrize("outcome, expected", [
+    ({"status": "starting", "title": "Track"}, "Starting: Track."),
+    ({"status": "playing", "title": "Track"}, "Playing: Track."),
+    ({"status": "queued", "title": "Track", "queue_position": 4}, "Queued: Track, position 4."),
+    ({"status": "failed", "message": "No match."}, "No match."),
 ])
-def test_song_acknowledgement_depends_on_actual_outcome(
-    monkeypatch, busy, outcome, expected_confirmation,
-):
-    from music.player import voice_manager
-
-    monkeypatch.setattr(voice_manager, "get_player", lambda guild: SimpleNamespace(
-        has_active_track=busy, is_connected=False,
-    ))
-    calls = []
-    outcome = json.dumps(outcome)
-
-    async def run():
-        searching = asyncio.Event()
-
-        async def play(*args):
-            if not busy:
-                await searching.wait()
-            return outcome
-
-        async def announce(guild, text, query, task):
-            assert not task.done()
-            assert query == "The Lady Don't Mind Talking Heads"
-            calls.append("searching")
-            searching.set()
-            return True
-
-        async def confirm(text, details, *, searching):
-            assert not searching
-            assert details == outcome
-            calls.append("confirmed")
-            return "confirmed"
-
-        monkeypatch.setattr(handler, "_execute_playback_tool", play)
-        monkeypatch.setattr(handler, "_announce_song_search", announce)
-        monkeypatch.setattr(handler, "_song_confirmation", confirm)
-        result = await asyncio.wait_for(handler._execute_song_request(
-            {"name": "play_music", "arguments": {"query": "The Lady Don't Mind Talking Heads"}},
-            SimpleNamespace(guild=object()), "Pon Lady Don't Mind de Talking Heads",
-        ), 1)
-        assert result == (outcome, expected_confirmation)
-
-    asyncio.run(run())
-    assert ("searching" in calls) is (not busy)
-    assert ("confirmed" in calls) is bool(expected_confirmation)
+def test_song_confirmation_depends_only_on_executed_outcome(monkeypatch, outcome, expected):
+    execute = AsyncMock(return_value=json.dumps(outcome))
+    model = AsyncMock()
+    monkeypatch.setattr(handler, "_execute_playback_tool", execute)
+    monkeypatch.setattr(handler, "send_to_openai", model)
+    result = asyncio.run(handler._execute_song_request(
+        {"name": "play_music", "arguments": {"query": "anything"}}, object(), "play anything"))
+    assert result == (json.dumps(outcome), expected)
+    model.assert_not_awaited()
 
 
 def test_song_gets_final_confirmation_when_current_track_ends_during_search(monkeypatch):
@@ -316,7 +187,6 @@ def test_song_gets_final_confirmation_when_current_track_ends_during_search(monk
     announce = AsyncMock()
     monkeypatch.setattr(handler, "_execute_playback_tool", play)
     monkeypatch.setattr(handler, "_song_confirmation", confirm)
-    monkeypatch.setattr(handler, "_announce_song_search", announce)
 
     async def run():
         request = asyncio.create_task(handler._execute_song_request(
@@ -332,7 +202,6 @@ def test_song_gets_final_confirmation_when_current_track_ends_during_search(monk
     assert asyncio.run(run()) == (
         outcome, "Playing Homemade Dynamite by Lorde."
     )
-    announce.assert_not_awaited()
     confirm.assert_awaited_once_with(
         "Play Homemade Dynamite by Lorde", outcome, searching=False
     )

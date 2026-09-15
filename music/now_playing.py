@@ -33,6 +33,7 @@ import discord
 
 from music.banner import generate_banner
 from music.player import voice_manager
+from voice.output import music_paused
 
 logger = logging.getLogger(__name__)
 
@@ -286,29 +287,32 @@ class NowPlayingView(discord.ui.View):
         self.start_updates()
 
     async def on_queue_empty(self):
-        """Queue exhausted — delete the now playing message and post a plain queue-finished embed."""
+        """Retire only this view; delayed HTTP replies cannot clear a newer track."""
+        message = self.message
+        revision = getattr(getattr(self.player, "operations", None), "revision", None)
         await self.stop_updates()
-
-        if not self.message and self.player.now_playing_message:
-            self.message = self.player.now_playing_message
-
-        if not self.message:
+        if message is None:
             return
-
-        channel = self.message.channel
         try:
-            await self.message.delete()
+            await message.delete()
         except Exception:
             pass
-        self.message = None
-        self.player.now_playing_message = None
-        logger.debug("[now_playing] cleared now playing banner; queue empty")
-
+        if self.message is message:
+            self.message = None
+        if self.player.now_playing_message is message:
+            self.player.now_playing_message = None
+        if self.player.current or self.player.queue:
+            return
+        if getattr(getattr(self.player, "operations", None), "revision", None) != revision:
+            return
         try:
-            msg = await channel.send(embed=_build_empty_embed())
-            self.player.queue_empty_message = msg
-        except Exception as e:
-            logger.error(f"[now_playing] queue empty post failed: {e}")
+            msg = await message.channel.send(embed=_build_empty_embed())
+            if self.player.current or self.player.queue or getattr(getattr(self.player, "operations", None), "revision", None) != revision:
+                await msg.delete()
+            else:
+                self.player.queue_empty_message = msg
+        except Exception as exc:
+            logger.error("[now_playing] queue empty post failed: %s", exc)
 
     # ── Row 0: playback controls ──────────────────────────────────────────────
 
@@ -323,7 +327,7 @@ class NowPlayingView(discord.ui.View):
         if not player.is_connected:
             await interaction.response.defer()
             return
-        if player.voice_client.is_paused():
+        if music_paused(player.voice_client):
             await voice_manager.resume(self.guild)
             button.emoji = discord.PartialEmoji.from_str("<:pause:1501401053277454416>")
         else:

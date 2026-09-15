@@ -46,6 +46,9 @@ DEFAULT_MODEL = OPENAI_MODEL
 
 async def send_to_openai(payload, tools=None):
     """Send a chat completion request and return a dict-shaped response."""
+    from core.capabilities import available_tools
+
+    tools = available_tools(tools or [])
     try:
         model = payload.get("model", DEFAULT_MODEL)
         messages = payload["messages"]

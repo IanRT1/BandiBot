@@ -6,11 +6,10 @@ Text-to-speech orchestration for BandiBot.
 This module chooses the configured TTS provider, routes generated PCM into the
 right Discord audio source, and handles cancellation. Provider-specific code
 lives in voice.tts_providers; low-level AudioSource buffering and music mixing
-live in voice.tts_sources.
+live in voice.output.
 
-Playback modes:
-  Mixer mode      -> inject TTS into MixerSource while music continues playing
-  Standalone mode -> play a dedicated StandaloneSource when no music is active
+Playback:
+  One output owner mixes music, speech, and activation independently.
 
 Switching providers:
   Change TTS_PROVIDER in .env to "kokoro", "deepgram", or "elevenlabs" and
@@ -27,14 +26,12 @@ import asyncio
 import logging
 import os
 import time
-import wave
 
 import discord
 
 from core.config import TTS_PROVIDER
 from core.paths import assets_root
 from voice.tts_providers import (
-    KOKORO_CHUNK_SIZE,
     create_tts_provider,
 )
 from voice.tts_sources import MixerSource, StandaloneSource
@@ -45,140 +42,22 @@ _provider = create_tts_provider(TTS_PROVIDER)
 
 
 def cancel_tts(voice_client: discord.VoiceClient):
-    """Cancel any in-progress TTS immediately."""
-    if not voice_client or not voice_client.is_connected():
-        return
-
-    source = getattr(voice_client, "source", None)
-    source = getattr(source, "mixer", None) or source
-    if isinstance(source, MixerSource):
-        source.cancel()
-        return
-
-    standalone = getattr(voice_client, "_standalone_tts", None)
-    if isinstance(standalone, StandaloneSource):
-        standalone.cancel()
-        voice_client._standalone_tts = None
-        try:
-            voice_client.stop_playing()
-        except Exception:
-            pass
+    from voice.output import existing_output
+    output = existing_output(voice_client)
+    if output:
+        output.source.cancel_speech()
 
 
-async def speak(
-    voice_client: discord.VoiceClient,
-    text: str,
-    guild=None,
-    clip_buffer=None,
-):
-    if not voice_client or not voice_client.is_connected():
-        return
-    if not text or not text.strip():
-        return
-
-    t_start = time.perf_counter()
-    logger.debug(f"[tts]  -> speaking ({len(text)} chars) via {TTS_PROVIDER}")
-
-    source = getattr(voice_client, "source", None)
-    source = getattr(source, "mixer", None) or source
-    is_mixer = isinstance(source, MixerSource) and voice_client.is_playing()
-
-    if is_mixer:
-        await _speak_mixer(source, text, t_start)
-    else:
-        await _speak_standalone(voice_client, text, t_start, clip_buffer=clip_buffer)
-
-
-async def _speak_mixer(mixer: MixerSource, text: str, t_start: float):
-    mixer.reset_cancel()
-    mixer._tts_finished.clear()
-
-    try:
-        first_chunk = True
-        async for chunk in _iter_provider_pcm(text):
-            with mixer._lock:
-                cancelled = mixer._cancelled
-            if cancelled:
-                logger.info("[tts]  -> stream cancelled mid-flight")
-                return
-
-            if first_chunk:
-                _log_first_chunk(t_start)
-                first_chunk = False
-
-            for feed_chunk in _iter_feed_chunks(chunk):
-                mixer.feed_tts(feed_chunk)
-
-        mixer.finish_tts()
-        logger.debug("[tts]  -> all chunks streamed, waiting for playback")
-
-    except Exception as e:
-        logger.error(f"[tts]  x {TTS_PROVIDER} error: {e}")
-        mixer.finish_tts()
-        return
-
-    await asyncio.get_event_loop().run_in_executor(
-        None, lambda: mixer.wait_tts_done(timeout=30.0)
-    )
-    _log_done(t_start)
-
-
-async def _speak_standalone(
-    voice_client: discord.VoiceClient,
-    text: str,
-    t_start: float,
-    clip_buffer=None,
-):
-    source = StandaloneSource(clip_buffer=clip_buffer)
-    voice_client._standalone_tts = source
-
-    logger.debug(
-        "[tts]  -> standalone play | "
-        f"is_playing={voice_client.is_playing()} "
-        f"is_connected={voice_client.is_connected()} "
-        f"source={voice_client.source}"
-    )
-    try:
-        voice_client.play(source, after=source.after_playback)
-        logger.debug("[tts]  -> standalone play succeeded")
-    except Exception as e:
-        logger.error(f"[tts]  x standalone play failed: {e}")
-        source.set_done()
-        voice_client._standalone_tts = None
-        return
-
-    try:
-        try:
-            first_chunk = True
-            async for chunk in _iter_provider_pcm(text):
-                if source.is_cancelled():
-                    logger.debug("[tts]  -> standalone stream cancelled mid-flight")
-                    return
-
-                if first_chunk:
-                    _log_first_chunk(t_start)
-                    first_chunk = False
-
-                for feed_chunk in _iter_feed_chunks(chunk):
-                    source.feed(feed_chunk)
-
-            source.set_done()
-            logger.debug("[tts]  -> all chunks streamed, waiting for playback")
-
-        except asyncio.CancelledError:
-            source.cancel()
-            return
-        except Exception as e:
-            logger.error(f"[tts]  x {TTS_PROVIDER} standalone error: {e}")
-            source.set_done()
-
-        await asyncio.get_event_loop().run_in_executor(
-            None, lambda: source._finished_evt.wait(timeout=60.0)
-        )
-        _log_done(t_start)
-    finally:
-        if getattr(voice_client, "_standalone_tts", None) is source:
-            voice_client._standalone_tts = None
+async def speak(voice_client: discord.VoiceClient, text: str, guild=None, clip_buffer=None):
+    from voice.output import get_output
+    from voice.results import SpeechResult
+    if not voice_client or not voice_client.is_connected() or not text.strip():
+        return SpeechResult.FAILED
+    output = get_output(voice_client, clip_buffer)
+    started = time.perf_counter()
+    result = await output.speak(text, _iter_provider_pcm)
+    logger.debug("[tts] delivery=%s total=%.0fms", result.value, (time.perf_counter() - started) * 1000)
+    return result
 
 
 async def _iter_provider_pcm(text: str):
@@ -204,73 +83,18 @@ async def _iter_provider_pcm(text: str):
             yield chunk
 
 
-def _iter_feed_chunks(chunk: bytes):
-    chunk_size = KOKORO_CHUNK_SIZE * 2 if TTS_PROVIDER == "kokoro" else len(chunk)
-    for i in range(0, len(chunk), chunk_size):
-        yield chunk[i:i + chunk_size]
-
-
 async def play_activation(voice_client: discord.VoiceClient):
-    """Play wake activation sound, mixing with music when possible."""
+    from voice.output import get_output
     if not voice_client or not voice_client.is_connected():
         return
-
     wav_path = str(assets_root() / "wake_activation.wav")
-    if not os.path.exists(wav_path):
-        logger.warning("[tts]  x wake_activation.wav not found")
+    if not os.path.isfile(wav_path):
         return
-
-    source = getattr(voice_client, "source", None)
-    source = getattr(source, "mixer", None) or source
-    if isinstance(source, MixerSource) and voice_client.is_playing():
-        await _play_activation_mixed(source, wav_path)
-    else:
-        await _play_activation_standalone(voice_client, wav_path)
-
-    logger.debug("[tts]  <- activation sound done")
-
-
-async def _play_activation_mixed(source: MixerSource, wav_path: str):
+    output = get_output(voice_client)
     try:
-        with wave.open(wav_path, "rb") as wf:
-            pcm = wf.readframes(wf.getnframes())
-
-        source.reset_cancel()
-        source._tts_finished.clear()
-        for i in range(0, len(pcm), 4096):
-            source.feed_tts(pcm[i:i + 4096])
-        source.finish_tts()
-        await asyncio.get_event_loop().run_in_executor(
-            None, lambda: source.wait_tts_done(timeout=10.0)
-        )
-    except Exception as e:
-        logger.error(f"[tts]  x activation error: {e}")
-
-
-async def _play_activation_standalone(voice_client: discord.VoiceClient, wav_path: str):
-    if voice_client.is_playing():
-        voice_client.stop_playing()
-        await asyncio.sleep(0.2)
-
-    done = asyncio.Event()
-    loop = asyncio.get_running_loop()
-
-    def _after(error):
-        loop.call_soon_threadsafe(done.set)
-
-    try:
-        voice_client.play(discord.FFmpegPCMAudio(wav_path), after=_after)
-        await done.wait()
-    except Exception as e:
-        logger.error(f"[tts]  x activation play failed: {e}")
-        done.set()
-
-
-def _log_first_chunk(t_start: float):
-    t_first = (time.perf_counter() - t_start) * 1000
-    logger.debug(f"[tts]  -> first chunk in {t_first:.0f}ms")
-
-
-def _log_done(t_start: float):
-    elapsed = (time.perf_counter() - t_start) * 1000
-    logger.debug(f"[tts]  <- done ({elapsed:.0f}ms total)")
+        output.ensure_started()
+        output.source.set_activation(discord.FFmpegPCMAudio(wav_path))
+        while not output.source.activation_done.is_set():
+            await asyncio.sleep(.02)
+    except Exception as exc:
+        logger.error("[tts] activation playback failed: %s", exc)

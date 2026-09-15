@@ -178,61 +178,25 @@ async def handle_audio_attachments(
     player = voice_manager.get_player(guild)
     requested_by = clean_username(requester.nick, requester.name)
 
-    async with voice_manager._get_play_lock(guild.id):
-        if not player.text_channel:
-            player.text_channel = message.channel
-
-        await player.connect(voice_channel)
-
-        queued_titles = []
-        # Keep the queue owned by the natural-end callback. Discord can
-        # briefly report no audio while player.current still holds the track.
-        is_busy = player.has_active_track or (
-            player.is_connected and player.voice_client.is_paused()
-        )
-
+    async def prepare():
+        tracks = []
         for attachment in attachments:
             ext = os.path.splitext(attachment.filename)[1].lower()
-            filename_title = os.path.splitext(attachment.filename)[0]
-
-            logger.info(f"[music] extracting metadata from {attachment.filename!r}")
             meta = await _extract_audio_metadata(attachment.url, ext)
+            tracks.append(Track(
+                title=meta["title"] or os.path.splitext(attachment.filename)[0],
+                stream_url=attachment.url, requested_by=requested_by,
+                webpage_url=attachment.url, duration=meta["duration"],
+                artist=meta["artist"], thumbnail_bytes=meta["thumbnail_bytes"],
+                resolved=True, source_kind="attachment",
+            ))
+        return tracks
 
-            title = meta["title"] or filename_title
-            artist = meta["artist"]
-            duration = meta["duration"]
-            thumbnail_bytes = meta["thumbnail_bytes"]
-
-            track = Track(
-                title=title,
-                stream_url=attachment.url,
-                requested_by=requested_by,
-                webpage_url=attachment.url,
-                duration=duration,
-                thumbnail=None,
-                thumbnail_bytes=thumbnail_bytes,
-                artist=artist,
-                resolved=True,
-            )
-            player.queue.append(track)
-            queued_titles.append(title)
-            logger.info(
-                f"[music] queued attachment: {title!r} | "
-                f"artist={artist!r} | duration={duration}s | "
-                f"cover={'yes' if thumbnail_bytes else 'no'}"
-            )
-
-        if not is_busy:
-            player.play_next()
-
-    if len(queued_titles) == 1:
-        if is_busy:
-            await message.reply(f"Agregado a la cola: **{queued_titles[0]}**", mention_author=False)
-        else:
-            await message.reply(f"Reproduciendo: **{queued_titles[0]}**", mention_author=False)
-    else:
-        titles_str = "\n".join(f"• {t}" for t in queued_titles)
-        await message.reply(
-            f"Agregados {len(queued_titles)} archivos a la cola:\n{titles_str}",
-            mention_author=False,
-        )
+    from bot.interactions import current_operation, render_music_result
+    token = current_operation.set(f"attachment:{message.id}")
+    try:
+        result = await voice_manager.enqueue(message.guild, requester, prepare,
+                                             text_channel=message.channel)
+    finally:
+        current_operation.reset(token)
+    await message.reply(render_music_result(result.to_dict()), mention_author=False)

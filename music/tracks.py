@@ -28,6 +28,7 @@ Playback timing:
 import time
 from dataclasses import dataclass, field
 from typing import Optional
+from uuid import uuid4
 
 
 @dataclass
@@ -49,3 +50,8 @@ class Track:
     query: Optional[str] = None
     error: Optional[str] = None
     playback_failures: int = 0
+    entry_id: str = field(default_factory=lambda: uuid4().hex)
+    operation_id: str | None = None
+    source_kind: str = "search"
+    identity: dict | None = None
+    request_context: object | None = field(default=None, repr=False)

@@ -57,8 +57,8 @@ an uncached runtime asset must be downloaded.
 - **Single song queuing** — resolved on the spot before playing, with unrequested music videos penalized in favor of audio, studio, and remaster results
 - **Bulk song queuing** — multiple songs or YouTube playlist URLs queued instantly as placeholders, resolved one track ahead in the background as songs play
 - **Graceful error handling** — unresolvable tracks are skipped with a notification at playback time
-- **Playback race recovery** — tracks that finish resolving while activation/TTS audio is playing wait safely instead of causing Discord's `Already playing audio` error; failed starts restore the track to the queue, while stop commands invalidate pending searches and stale Now Playing posts
-- **Stream URL refresh** — stale signed YouTube stream URLs are refreshed from the existing video URL before playback, avoiding a second search/ranking pass; playback failures can still search for an alternative result
+- **Playback race recovery** — one audio owner coordinates music, speech, and activation; stop invalidates pending searches and stale Now Playing posts
+- **Stream URL refresh** — stale signed YouTube stream URLs are refreshed from the existing video URL before playback, avoiding a second search/ranking pass; playback retries retain the selected video identity
 - **Now Playing embed** with live timer, album art banner, next track preview, and interactive button controls (restart, play/pause, skip, stop, queue, loop, shuffle, copy link)
 
 ### Text Commands
@@ -73,8 +73,8 @@ an uncached runtime asset must be downloaded.
 ### Reliability and Privacy
 - **Structured runtime logs** with separate startup, chat, voice, STT, TTS, tool, and RAG events
 - **Two-session diagnostics** — `logs/session.log` captures the current run and `logs/session.previous.log` preserves the immediately preceding run; both always capture `DEBUG` detail locally
-- **Selective tool routing** — obvious music, voice, web, member-activity, lore, and casual requests receive only the smallest safe tool set; ambiguous requests retain the full fallback set
-- **Transparent chat logs** — message and response previews are shown by default; set `LOG_SENSITIVE_CONTENT=0` to hide conversation contents
+- **Capability-aware tool routing** — text and voice retain music capabilities; optional web search is omitted when the Gemini key is absent at startup
+- **Transparent chat logs** — message and response previews are shown by default; set `logging.sensitive_content = false` in `config.toml` to hide conversation contents
 - **Quiet local embeddings** — casual or very short messages without a lore/name signal skip semantic retrieval, and Sentence Transformers progress output is disabled
 - **Startup preflight** — required configuration, runtime dependencies, voice assets, and context files are validated before connecting to Discord
 - **Graceful shutdown and recovery** — active voice/music sessions are cleaned up on exit; transient connection failures retry with bounded backoff, while invalid credentials stop immediately
@@ -111,26 +111,39 @@ Discord Gateway
                            ├── voice/handler.py (LLM + tool calls)
                            └── voice/tts.py (TTS orchestration)
                                      ├── voice/tts_providers.py (Kokoro / Deepgram / ElevenLabs registry)
-                                     ├── voice/tts_sources.py (MixerSource / StandaloneSource)
-                                     └── music/player.py (FFmpeg → MixerSource → Discord)
+                                     ├── voice/output.py (music / speech / activation inputs)
+                                     └── music/player.py (FFmpeg → AudioOutput → Discord)
 ```
 
 ### Key Design Decisions
 
-**TTS mixed into music at PCM level** — `MixerSource` wraps the FFmpeg audio source and injects TTS frames directly, ducking music volume during speech. No pausing, no restarting.
+**One audio output owner** — `voice/output.py` mixes independent music, speech, and activation inputs. Speech ducks music and remains audible while music is paused. Cancellation discards buffered and late speech frames without stopping music.
 
 **Placeholder queue with one-ahead resolution** — bulk queued songs appear instantly in the queue. The background resolver pre-loads only the next track while the current one plays, then triggers the next resolution when the song changes. Respectful of YouTube's API and accurate to actual queue state.
 
-**Interruption system across async and audio threads** — wake word detection runs on the audio thread. When it fires mid-TTS, `cancel_tts()` immediately clears the TTS buffer, and `_interrupt_current()` cancels the asyncio pipeline task. Music tool execution is protected from incidental wake-word interruption so queue state remains consistent; an explicit stop command can still invalidate an in-progress song search before it queues or plays.
+**Interruption system across async and audio threads** — wake word detection runs on the audio thread. When it fires mid-TTS, `cancel_tts()` immediately clears the TTS buffer, and `_interrupt_current()` cancels the asyncio pipeline task. Accepted music operations outlive the interrupted conversation task; an explicit stop invalidates pending commits. Operation IDs, queue revisions, and playback generations prevent duplicate or stale actions.
 
 **Per-user state machines** — each user in the voice channel has independent wake word detection, VAD state, and capture buffers. Packet loss or bad audio from one user does not affect others.
 
 **Music starts voice listening** — when a text command makes the bot join voice for music playback, `music/player.py` explicitly starts the wake-word listener on the same voice client. The Discord voice-state event remains a fallback for joins that did not originate in the command path, while the listener manager serializes lifecycle operations and avoids competing sessions.
 
-**Playback state recovery** — resolver callbacks re-check whether Discord is
-already playing standalone activation/TTS audio. If a playback start is
-rejected, the track is restored to the queue and phantom `current` state is
-cleared so later music commands continue normally.
+**Music state ownership** — `music/player.py` owns queue mutations, while
+`music/operations.py` bounds concurrent preparation and commits in acceptance
+order. Stable entry IDs and session/attempt checks protect reconnect recovery.
+
+**Shared command execution** — `bot/interactions.py` executes text and voice
+actions through the same boundary. Music receipts come from actual results;
+voice uses short status confirmations and Discord retains full metadata.
+
+**Song identity before ranking** — single-song tools supply structured title,
+artist, version, or exact-source fields. `music/requests.py` builds resolver
+input without deleting title words. If extraction omits the title, it searches the
+original request instead of only the artist. A failed single-song search gets one
+recovery attempt using the original title words and phonetic artist correction;
+recovered candidates are checked against the original request. Successful searches
+keep their normal path. Unsupported matches get a brief clarification, not a menu
+of unrelated results. Interpretation remains
+probabilistic; operation deduplication is process-local, not durable across crashes.
 
 **Private deployment context** — personal instructions and server lore are ignored by Git. Generic `.example.txt` templates are tracked and used automatically when the private files are absent.
 
@@ -332,16 +345,20 @@ KOKORO_VOICE=ef_dora
 KOKORO_LANG=e
 KOKORO_SPEED=1.1
 
-# Logging: INFO is the clean default; use DEBUG for timing/RAG diagnostics.
-LOG_LEVEL=INFO
-# Set to 0 to hide message/response contents.
-LOG_SENSITIVE_CONTENT=1
-
 # Optional writable locations when running outside the source checkout.
 # Defaults to the current working directory and its data/ and logs/ folders.
 # BANDIBOT_RUNTIME_DIR=C:/Users/you/BandiBot
 # BANDIBOT_DATA_DIR=C:/Users/you/BandiBot/data
 ```
+
+Music work limits and logging are configured in [`config.toml`](config.toml),
+loaded from the runtime directory (the working directory by default). Missing
+settings use defaults; unknown keys and invalid values fail startup with a clear
+error. Restart after editing. These settings no longer read environment overrides.
+
+`GEMINI_API_KEY` is optional. Preflight checks only whether it is non-empty;
+without it, `web_search` is omitted from both text and voice tools. Restart after
+adding or removing the key. A present key is not validated against Gemini at startup.
 
 `TTS_PROVIDER` supports `kokoro`, `deepgram`, and `elevenlabs`. Provider changes take effect after restarting the bot. `GEMINI_SEARCH_MODEL` is fixed in `core/config.py` and is not a secret.
 
@@ -398,7 +415,9 @@ Discord's Opus codec introduces audio degradation compared to a direct microphon
 BandiBot/
 ├── core/
 │   ├── client.py           # Discord client, event routing, reconnection logic
-│   ├── config.py           # Centralized environment variable loading
+│   ├── config.py           # Centralized environment and runtime configuration
+│   ├── settings.py         # Validated TOML settings
+│   ├── capabilities.py     # Optional tool availability
 │   ├── paths.py            # Packaged assets and writable runtime paths
 │   ├── instance_lock.py     # Single-process runtime guard
 │   ├── interaction_logging.py # Interaction timing, privacy, and usage logs
@@ -408,16 +427,21 @@ BandiBot/
 ├── voice/
 │   ├── listener.py         # Wake word, VAD, STT, TTS pipeline per guild
 │   ├── handler.py          # Voice command LLM bridge, _FakeMsgProxy
+│   ├── output.py           # Sole Discord playback owner
+│   ├── results.py          # Speech delivery outcomes
 │   ├── audio.py            # Stateless PCM conversion helpers
 │   ├── clips.py            # Last-30-seconds voice clip export
 │   ├── stt.py              # Deepgram STT wrapper
 │   ├── tts.py              # TTS orchestration, cancellation, activation sound
 │   ├── tts_providers.py    # TTS provider interface, adapters, registry, fallback support
-│   └── tts_sources.py      # MixerSource and StandaloneSource audio sources
+│   └── tts_sources.py      # Audio constants and legacy source compatibility
 │
 ├── music/
 │   ├── player.py           # Music queue, guild playback state, FFmpeg playback
 │   ├── resolver.py         # yt-dlp search, URL resolution, playlist extraction
+│   ├── operations.py       # Bounded preparation, ordered commits, cancellation
+│   ├── identity.py         # Candidate review and clarification
+│   ├── requests.py         # Structured song input conversion
 │   ├── tracks.py           # Shared Track model
 │   ├── results.py           # Structured play/queue/failure outcomes
 │   ├── attachments.py      # Uploaded audio ingestion and metadata extraction
@@ -426,6 +450,7 @@ BandiBot/
 │
 ├── bot/
 │   ├── handlers.py         # Text command handling, LLM context, replies
+│   ├── interactions.py     # Shared execution and authoritative receipts
 │   ├── google_search.py    # Gemini Google Search grounding adapter
 │   ├── retrieval.py        # Local hybrid RAG chunking and retrieval
 │   ├── openai_client.py    # OpenAI SDK wrapper
@@ -465,6 +490,7 @@ BandiBot/
 ├── __main__.py             # Direct module entry point
 ├── pyproject.toml          # Package config, bandibot CLI entry point
 ├── requirements.txt        # Python dependencies
+├── config.toml            # Non-secret music and logging settings
 ├── .env.example            # Environment variable template
 ├── .env                    # Secrets/API keys (not committed)
 ├── .gitignore
@@ -506,7 +532,8 @@ The tests cover:
   cancellation behavior
 - Private context separation and ignored test-cache directories
 
-The suite currently contains **143 tests**. The only expected warning is Python's
+The suite includes structured song inputs, operation cancellation, audio output,
+capability gating, and configuration validation. The only expected warning is Python's
 `audioop` deprecation warning from the Discord dependency.
 
 For a local syntax check, compile the edited modules with:
@@ -567,7 +594,7 @@ and optionally change `ELEVENLABS_VOICE_ID` or `ELEVENLABS_MODEL` in `.env`.
 ElevenLabs audio is streamed as 24 kHz PCM and converted to Discord's 48 kHz
 PCM format automatically.
 
-Low-level Discord audio buffering lives in `voice/tts_sources.py`. Provider output conversion, including Kokoro's 24kHz float32 to 48kHz int16 PCM conversion, routes through helpers in `voice/audio.py`.
+Runtime Discord audio mixing and buffering live in `voice/output.py`. Provider output conversion, including Kokoro's 24kHz float32 to 48kHz int16 PCM conversion, routes through helpers in `voice/audio.py`.
 
 ### STT Language
 

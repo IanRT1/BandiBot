@@ -41,6 +41,15 @@ _OPTIONS = PrerecordedOptions(
 )
 
 
+class Transcript(str):
+    """Keep provider evidence without changing existing text consumers."""
+    def __new__(cls, text, *, confidence=None, language=None):
+        value = super().__new__(cls, text)
+        value.confidence = confidence
+        value.language = language
+        return value
+
+
 async def transcribe(wav_bytes: bytes) -> str:
     try:
         t = time.perf_counter()
@@ -72,7 +81,7 @@ async def transcribe(wav_bytes: bytes) -> str:
                 f"[stt]  ✗ empty "
                 f"(lang={STT_LANGUAGE}, conf={confidence:.2f}, {elapsed:.0f}ms)"
             )
-        return transcript.strip()
+        return Transcript(transcript.strip(), confidence=confidence, language=STT_LANGUAGE)
     except Exception as e:
         logger.error(f"[stt]  ✗ error: {e}")
         return ""

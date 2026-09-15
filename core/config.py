@@ -1,15 +1,18 @@
 """
 core/config.py
 
-Centralized environment configuration for BandiBot.
+Centralized environment and runtime-file configuration for BandiBot.
 
 All environment variables are loaded here once at startup.
 Import from this module instead of calling os.getenv() directly.
 """
 import os
 from dotenv import load_dotenv
+from core.paths import runtime_root
+from core.settings import load_settings
 
 load_dotenv()
+_settings = load_settings(runtime_root() / "config.toml")
 
 # ── Discord ───────────────────────────────────────────────────
 DISCORD_TOKEN: str = os.getenv("DISCORD_TOKEN", "")
@@ -24,7 +27,7 @@ if not OPENAI_API_KEY:
 OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-5.6-luna")
 
 # Optional web-search answer provider. The bot remains usable without it and
-# reports a clear tool error when web search is requested without a key.
+# omits web search entirely when the key is absent at startup.
 GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
 # Fixed grounded-search model for this deployment.
 GEMINI_SEARCH_MODEL: str = "gemini-3.8-flash"
@@ -57,8 +60,15 @@ KOKORO_SPEED: float = float(os.getenv("KOKORO_SPEED", "1.1"))
 YOUTUBE_JS_RUNTIME: str = "node"
 YOUTUBE_REMOTE_COMPONENTS: str = "ejs:github"
 
+# Bounded music work. Queue state transitions never wait on these workers.
+MUSIC_OPERATION_TIMEOUT_SECONDS = _settings["music"]["operation_timeout_seconds"]
+MUSIC_PREPARE_CONCURRENCY = _settings["music"]["prepare_concurrency"]
+MUSIC_PENDING_LIMIT = _settings["music"]["pending_limit"]
+MUSIC_IDENTITY_REVIEW_TIMEOUT_SECONDS = _settings["music"]["identity_review_timeout_seconds"]
+MUSIC_CLARIFICATION_TIMEOUT_SECONDS = _settings["music"]["clarification_timeout_seconds"]
+
 # ── Logging ───────────────────────────────────────────────────
-LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_LEVEL: str = _settings["logging"]["level"]
 # Message and response previews remain visible for operational transparency.
-# Set to 0 if deployments should keep conversation contents out of logs.
-LOG_SENSITIVE_CONTENT: bool = os.getenv("LOG_SENSITIVE_CONTENT", "1") == "1"
+# Set logging.sensitive_content to false to exclude conversation contents.
+LOG_SENSITIVE_CONTENT: bool = _settings["logging"]["sensitive_content"]

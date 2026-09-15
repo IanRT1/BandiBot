@@ -32,6 +32,7 @@ __pycache__/
 *.pyo
 *.pyd
 .pytest_cache/
+.pytest-tmp/
 pytest-cache-files*/
 *.sqlite3
 *.db
@@ -50,6 +51,7 @@ Thumbs.db
 
 .vscode/
 .idea/
+.claude/settings.local.json
 *.swp
 *.swo
 

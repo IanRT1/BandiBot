@@ -40,7 +40,10 @@ import discord
 
 from music.resolver import extract_playlist, resolve_track
 from music.tracks import Track
-from music.results import PlayResult
+from music.results import PlayResult, ActionResult
+from music.operations import GuildOperations
+from bot.interactions import current_operation
+from voice.output import get_output, existing_output, music_active, music_paused, stop_music, pause_music
 
 logger = logging.getLogger(__name__)
 
@@ -64,14 +67,43 @@ async def _resolve_track_async(
     requested_by: str,
     exclude_webpage_urls: set[str] | None = None,
 ) -> Track:
+    from music.identity import IdentityReviewRequired, NeedsClarification, review_identity, clarifications
+    from music.resolver import resolve_candidates
+    from bot.interactions import current_request
+    from bot.openai_client import send_to_openai
+    from music.requests import SongSearchQuery, recover_song_query
+
+    async def resolve(search_query=query, *, recovery=False):
+        try:
+            options = {"require_identity_review": True} if recovery else {}
+            return await asyncio.to_thread(resolve_track, search_query, requested_by, exclude_webpage_urls, **options)
+        except IdentityReviewRequired as review:
+            from core.config import MUSIC_IDENTITY_REVIEW_TIMEOUT_SECONDS
+            try:
+                selected = await asyncio.wait_for(review_identity(review, send_to_openai), MUSIC_IDENTITY_REVIEW_TIMEOUT_SECONDS) if review.candidates else []
+            except asyncio.TimeoutError:
+                selected = []
+            if selected:
+                track = await asyncio.to_thread(resolve_candidates, selected, search_query, requested_by)
+                track.identity = {"query": search_query, "source_ids": [entry.get("id") for _, entry in selected]}
+                return track
+            if isinstance(query, SongSearchQuery) and not recovery:
+                try:
+                    repaired = await asyncio.wait_for(recover_song_query(query.original_text, send_to_openai), MUSIC_IDENTITY_REVIEW_TIMEOUT_SECONDS)
+                except asyncio.TimeoutError:
+                    repaired = None
+                if repaired and repaired != search_query:
+                    return await resolve(repaired, recovery=True)
+            context = current_request.get()
+            if context and context.guild_id is not None and context.user_id is not None:
+                clarifications.clear(context.guild_id, context.user_id)
+            # A failed identity check is not evidence that ANY search result is
+            # a valid alternative. Do not turn unrelated hits into a forced menu.
+            raise NeedsClarification("I couldn't match that song. Please repeat the title and artist, or send a link.")
     try:
-        return await asyncio.wait_for(
-            asyncio.to_thread(resolve_track, query, requested_by, exclude_webpage_urls),
-            timeout=_RESOLVE_TIMEOUT,
-        )
+        return await asyncio.wait_for(resolve(), timeout=_RESOLVE_TIMEOUT)
     except asyncio.TimeoutError as exc:
-        logger.error(f"[music] resolve timed out after {_RESOLVE_TIMEOUT}s for {query!r}")
-        raise TimeoutError("YouTube search timed out.") from exc
+        raise TimeoutError("Song resolution timed out.") from exc
 
 
 def _copy_resolved_track(target: Track, resolved: Track):
@@ -132,10 +164,16 @@ class GuildPlayer:
         self.queue: deque[Track] = deque()
         self.current: Optional[Track] = None
         self._playback_generation = 0
+        self.closing = False
+        self.connection_generation = 0
+        self.playback_attempt = 0
+        self.operations = GuildOperations()
         self._pending_play_requests = 0
         self.voice_client: Optional[discord.VoiceClient] = None
         self._idle_task: Optional[asyncio.Task] = None
         self._resolver_task: Optional[asyncio.Task] = None
+        self._entry_tasks: dict[str, asyncio.Task] = {}
+        self._leave_task: asyncio.Task | None = None
         self._start_when_free_task: Optional[asyncio.Task] = None
         self.now_playing_message = None
         self._now_playing_view = None
@@ -154,7 +192,8 @@ class GuildPlayer:
         return (
             self.is_connected
             and self.current is not None
-            and self.voice_client.is_playing()
+            and music_active(self.voice_client)
+            and not music_paused(self.voice_client)
         )
 
     @property
@@ -170,18 +209,23 @@ class GuildPlayer:
     @property
     def has_pending_play_requests(self) -> bool:
         """Whether a single-song request is still resolving or connecting."""
-        return self._pending_play_requests > 0
+        return self._pending_play_requests > 0 or bool(self.operations.pending)
 
     @property
     def elapsed_seconds(self) -> float:
         if not self.current:
             return 0.0
-        elapsed = time.time() - self.current.started_at - self.current.total_paused
-        if self.current.paused_at is not None:
-            elapsed -= (time.time() - self.current.paused_at)
-        return max(0.0, elapsed)
+        output = existing_output(self.voice_client)
+        if output:
+            return output.source.music_frames * .02
+        return 0.0
 
     async def connect(self, voice_channel: discord.VoiceChannel):
+        if self.closing:
+            raise RuntimeError("Voice session is closing")
+        old_channel = getattr(self.voice_client, "channel", None)
+        if old_channel != voice_channel:
+            self.connection_generation += 1
         existing = voice_channel.guild.voice_client
         if existing and existing.is_connected():
             self.voice_client = existing
@@ -197,7 +241,15 @@ class GuildPlayer:
         await self._ensure_voice_listener(voice_channel)
 
     async def disconnect(self):
+        self.closing = True
+        if self._leave_task and self._leave_task is not asyncio.current_task():
+            self._leave_task.cancel()
+        self._leave_task = None
+        self.connection_generation += 1
         self._playback_generation += 1
+        self._cancel_entry_tasks()
+        await asyncio.gather(*list(self._entry_tasks.values()), return_exceptions=True)
+        await self.operations.close()
         if self._idle_task:
             self._idle_task.cancel()
             self._idle_task = None
@@ -214,10 +266,28 @@ class GuildPlayer:
         self.current = None
         self.queue.clear()
         self.now_playing_message = None
+        self.closing = False
+
+    def schedule_leave(self):
+        """Farewell delivery may finish early; its failure cannot prevent leaving."""
+        if self._leave_task and not self._leave_task.done():
+            return
+        self.closing = True
+        self.operations.invalidate()
+
+        async def finish_leave():
+            await asyncio.sleep(8)
+            await self.disconnect()
+            from voice.listener import voice_listener_manager
+            await voice_listener_manager.stop_listening(self.guild)
+
+        self._leave_task = asyncio.create_task(finish_leave())
 
     async def prepare_for_voice_recovery(self):
         """Detach stale voice state while preserving playback for reconnection."""
+        self.connection_generation += 1
         self._playback_generation += 1
+        self._cancel_entry_tasks()
         current = self.current
         self.current = None
         self.voice_client = None
@@ -287,6 +357,31 @@ class GuildPlayer:
         except Exception as e:
             logger.error(f"[voice] failed to start listener after music connect: {e}")
 
+    async def _resolve_entry(self, track):
+        task = self._entry_tasks.get(track.entry_id)
+        if task is None or task.done() or task.cancelling():
+            async def resolve():
+                from bot.interactions import current_request
+                token = current_request.set(track.request_context)
+                try:
+                    query = track.webpage_url or track.query or track.title
+                    resolved = await _resolve_track_async(query, track.requested_by)
+                    _copy_resolved_track(track, resolved)
+                    return track
+                finally:
+                    current_request.reset(token)
+            task = asyncio.create_task(resolve())
+            self._entry_tasks[track.entry_id] = task
+            def finished(done):
+                if self._entry_tasks.get(track.entry_id) is done:
+                    self._entry_tasks.pop(track.entry_id, None)
+            task.add_done_callback(finished)
+        return await asyncio.shield(task)
+
+    def _cancel_entry_tasks(self):
+        for task in list(self._entry_tasks.values()):
+            task.cancel()
+
     def start_resolver(self):
         """Start the background resolver loop if not already running."""
         if self._resolver_task and not self._resolver_task.done():
@@ -308,11 +403,8 @@ class GuildPlayer:
 
             logger.debug(f"[music] resolver: pre-resolving {next_unresolved.title!r}")
             try:
-                resolved = await _resolve_track_async(
-                    next_unresolved.query, next_unresolved.requested_by
-                )
-                _copy_resolved_track(next_unresolved, resolved)
-                logger.debug(f"[music] resolver: resolved → {resolved.title!r}")
+                await self._resolve_entry(next_unresolved)
+                logger.debug(f"[music] resolver: resolved → {next_unresolved.title!r}")
             except Exception as e:
                 next_unresolved.resolved = True
                 next_unresolved.error = str(e)
@@ -341,6 +433,7 @@ class GuildPlayer:
             return
 
         track = self.queue.popleft()
+        self.operations.revision += 1
 
         if track.error:
             logger.warning(f"[music] skipping errored track {track.title!r}: {track.error}")
@@ -361,20 +454,17 @@ class GuildPlayer:
             loop = self.voice_client.client.loop
 
             generation = self._playback_generation
+            self.current = track
 
             def play_if_current():
-                if generation == self._playback_generation:
+                if generation == self._playback_generation and self.current is track:
                     self._play_resolved(track)
 
             async def _wait_and_play():
                 try:
-                    # Refresh the signed stream URL directly; searching again
-                    # would repeat candidate ranking for the same track.
-                    refresh_query = track.webpage_url or track.query or track.title
-                    resolved = await _resolve_track_async(
-                        refresh_query, track.requested_by
-                    )
-                    _copy_resolved_track(track, resolved)
+                    await self._resolve_entry(track)
+                except asyncio.CancelledError:
+                    return
                 except Exception as e:
                     track.resolved = True
                     track.error = str(e)
@@ -386,15 +476,9 @@ class GuildPlayer:
         self._play_resolved(track)
 
     def _voice_busy_without_music(self) -> bool:
-        from voice.tts_sources import StandaloneSource
-        source = getattr(self.voice_client, "source", None)
-        if isinstance(source, StandaloneSource) and source.mixer is None and not source._exhausted:
-            return False
-        return (
-            self.is_connected
-            and self.current is None
-            and self.voice_client.is_playing()
-        )
+        # Only an unowned legacy source can conflict during an idle handover.
+        return bool(self.is_connected and not existing_output(self.voice_client)
+                    and self.voice_client.is_playing())
 
     def _schedule_start_when_free(self):
         if self._start_when_free_task and not self._start_when_free_task.done():
@@ -410,7 +494,7 @@ class GuildPlayer:
                 self.queue
                 and self.is_connected
                 and self.current is None
-                and self.voice_client.is_playing()
+                and self._voice_busy_without_music()
                 and time.time() < deadline
             ):
                 await asyncio.sleep(0.2)
@@ -466,8 +550,8 @@ class GuildPlayer:
         track.paused_at = None
         track.total_paused = 0.0
         self.current = track
+        self._manual_stop = False
 
-        from voice.tts import MixerSource
         from voice.listener import voice_listener_manager
         session = voice_listener_manager.get_session(self.guild)
         clip_buffer = session.clip_buffer if session else None
@@ -479,18 +563,20 @@ class GuildPlayer:
             stderr=subprocess.PIPE,
         )
         volume_source = discord.PCMVolumeTransformer(ffmpeg_source, volume=DEFAULT_VOLUME)
-        mixer_source  = MixerSource(volume_source, clip_buffer=clip_buffer)
+        output = get_output(self.voice_client, clip_buffer)
 
         loop = self.voice_client.client.loop
         generation = self._playback_generation
+        self.playback_attempt += 1
+        attempt = self.playback_attempt
 
-        def _after(error):
-            if generation != self._playback_generation:
+        def _after_on_loop(error):
+            if generation != self._playback_generation or attempt != self.playback_attempt or self.current is not track:
                 return
             finished_track = self.current
             elapsed = self.elapsed_seconds if finished_track else 0.0
-            if mixer_source.primary_exhausted:
-                elapsed = mixer_source.primary_elapsed_seconds
+            if output.source.music_exhausted:
+                elapsed = output.source.music_frames * .02
             stderr_text = _read_ffmpeg_stderr(ffmpeg_source)
             if error:
                 logger.error(f"Playback error in {self.guild.name}: {error}")
@@ -513,7 +599,7 @@ class GuildPlayer:
 
                     async def _refresh_and_retry():
                         try:
-                            refresh_query = finished_track.query
+                            refresh_query = finished_track.webpage_url or finished_track.query
                             excluded_urls = {finished_track.webpage_url} if finished_track.webpage_url else set()
                             resolved = await _resolve_track_async(
                                 refresh_query,
@@ -548,7 +634,7 @@ class GuildPlayer:
                     asyncio.run_coroutine_threadsafe(_refresh_and_retry(), loop)
                     return
 
-            if self._loop and self.current:
+            if self._loop and self.current and not self._manual_stop:
                 self.queue.appendleft(self.current)
 
             self._natural_transition = (
@@ -557,14 +643,12 @@ class GuildPlayer:
             self._manual_stop = False
             loop.call_soon_threadsafe(self.play_next)
 
+        def _after(error):
+            loop.call_soon_threadsafe(_after_on_loop, error)
+
         try:
-            from voice.tts_sources import StandaloneSource
-            active_source = getattr(self.voice_client, "source", None)
-            if (self.voice_client.is_playing() and isinstance(active_source, StandaloneSource)
-                    and active_source.attach_music(mixer_source, _after)):
-                logger.debug("[music] attached music under active speech with ducking")
-            else:
-                self.voice_client.play(mixer_source, after=_after)
+            output.ensure_started()
+            output.source.set_music(volume_source, _after)
         except Exception as exc:
             # Discord can reject play() when another standalone source starts
             # between our busy check and this call. Do not lose the track or
@@ -577,7 +661,8 @@ class GuildPlayer:
                 track.title,
                 exc,
             )
-            if self.voice_client.is_playing():
+            volume_source.cleanup()
+            if self._voice_busy_without_music():
                 self._schedule_start_when_free()
             return
 
@@ -615,7 +700,7 @@ class GuildPlayer:
             return
         if not self.is_connected:
             return
-        if self.is_playing:
+        if self.current or self.queue or self.has_pending_play_requests:
             return
         logger.info(f"[music] idle timeout reached in {self.guild.name}, leaving VC")
         await self.disconnect()
@@ -626,6 +711,10 @@ class VoiceManager:
     def __init__(self):
         self._players: dict[int, GuildPlayer] = {}
         self._play_locks: dict[int, asyncio.Lock] = {}
+        self._closing = False
+
+    def begin_shutdown(self):
+        self._closing = True
 
     def get_player(self, guild: discord.Guild) -> GuildPlayer:
         if guild.id not in self._players:
@@ -634,6 +723,7 @@ class VoiceManager:
 
     async def shutdown(self):
         """Disconnect every guild player and clear runtime playback state."""
+        self.begin_shutdown()
         players = list(self._players.values())
         for player in players:
             try:
@@ -648,194 +738,169 @@ class VoiceManager:
             self._play_locks[guild_id] = asyncio.Lock()
         return self._play_locks[guild_id]
 
-    async def play(self, guild, requester_member, query: str) -> PlayResult:
-        if not requester_member.voice or not requester_member.voice.channel:
-            return PlayResult("failed", error_code="not_in_voice", message="User is not in a voice channel; cannot play music.")
+    def _operations(self, player):
+        # Also supports lightweight player adapters in offline tests.
+        if not hasattr(player, "operations"):
+            player.operations = GuildOperations()
+        return player.operations
 
-        voice_channel = requester_member.voice.channel
+    async def enqueue(self, guild, requester, prepare, *, text_channel=None, label="Pending music request"):
+        if self._closing:
+            return PlayResult("failed", error_code="closing", message="The bot is shutting down.")
+        if not getattr(requester, "voice", None) or not requester.voice.channel:
+            return PlayResult("failed", error_code="not_in_voice", message="User is not in a voice channel; cannot play music.")
         player = self.get_player(guild)
-        request_generation = getattr(player, "_playback_generation", 0)
-        player._playback_generation = request_generation
+        if getattr(player, "closing", False):
+            return PlayResult("failed", error_code="closing", message="The voice session is closing.")
+        operations = self._operations(player)
+        channel = requester.voice.channel
+        connection_generation = getattr(player, "connection_generation", 0)
         player._pending_play_requests = getattr(player, "_pending_play_requests", 0) + 1
 
-        try:
+        async def commit(tracks, operation):
+            if not tracks:
+                return PlayResult("failed", error_code="no_tracks", message="No playable tracks found.")
             async with self._get_play_lock(guild.id):
-                if request_generation != player._playback_generation:
+                if not operations.valid(operation):
                     return PlayResult("failed", error_code="cancelled", message="Song request cancelled.")
+                if not getattr(requester, "voice", None) or requester.voice.channel != channel:
+                    return PlayResult("failed", error_code="channel_changed", message="Your voice channel changed while the request was loading.")
+                if getattr(player, "connection_generation", 0) != connection_generation and getattr(getattr(player, "voice_client", None), "channel", None) not in (None, channel):
+                    return PlayResult("failed", error_code="channel_changed", message="The bot moved to another voice channel while the request was loading.")
                 try:
-                    track = await _resolve_track_async(query, requester_member.display_name)
-                except Exception as e:
-                    logger.error(f"[music] resolve failed for {query!r}: {e}")
-                    return PlayResult("failed", error_code="resolution_failed", message=f"Could not resolve track: {e}")
-
-                if request_generation != player._playback_generation:
-                    return PlayResult("failed", error_code="cancelled", message="Song request cancelled.")
-
-                try:
-                    await player.connect(voice_channel)
+                    await player.connect(channel)
                 except Exception as exc:
                     return PlayResult("failed", error_code="connection_failed", message=f"Could not connect to voice: {exc}")
-
-                if request_generation != player._playback_generation:
+                if not operations.valid(operation):
                     return PlayResult("failed", error_code="cancelled", message="Song request cancelled.")
-                player.queue.append(track)
-
-                is_busy = player.has_active_track or (player.is_connected and player.voice_client.is_paused())
-
-                if not is_busy:
+                if text_channel and not player.text_channel:
+                    player.text_channel = text_channel
+                for track in tracks:
+                    from bot.interactions import current_request
+                    track.operation_id = operation.operation_id
+                    track.request_context = current_request.get()
+                    player.queue.append(track)
+                operations.revision += 1
+                busy = player.has_active_track or (player.is_connected and music_paused(player.voice_client))
+                if not busy:
                     player.play_next()
-                    if player.current is track:
-                        return PlayResult("playing", title=track.title, artist=track.artist or None)
-                    if track in player.queue:
-                        if player.current is None and player.queue[0] is track:
-                            return PlayResult("starting", title=track.title, artist=track.artist or None)
-                        return PlayResult("queued", title=track.title, artist=track.artist or None,
-                                          queue_position=list(player.queue).index(track) + 1)
-                    return PlayResult("failed", error_code="playback_failed", message="The track could not start playback.")
-                else:
-                    position = len(player.queue)
-                    logger.info("[music] queued position=%d: %s", position, track.title)
-                    return PlayResult("queued", title=track.title, artist=track.artist or None, queue_position=position)
+                if len(tracks) > 1:
+                    if hasattr(player, "start_resolver"):
+                        player.start_resolver()
+                    return PlayResult("queued", title=f"{len(tracks)} tracks", message=f"Added {len(tracks)} tracks to the queue.")
+                track = tracks[0]
+                if player.current is track:
+                    output = existing_output(player.voice_client)
+                    status = "playing" if output is None or output.source.music_frames else "starting"
+                    return PlayResult(status, title=track.title, artist=track.artist, entry_id=track.entry_id)
+                if track in player.queue:
+                    position = list(player.queue).index(track) + 1
+                    if not busy and player.current is None and position == 1:
+                        return PlayResult("starting", title=track.title, artist=track.artist, entry_id=track.entry_id)
+                    return PlayResult("queued", title=track.title, artist=track.artist, queue_position=position, entry_id=track.entry_id)
+                return PlayResult("failed", error_code="playback_failed", message="The track could not start playback.")
+
+        try:
+            return await operations.submit(prepare, commit, operation_id=current_operation.get(), label=label)
         finally:
             player._pending_play_requests -= 1
 
-    async def queue_bulk(self, guild, requester_member, queries: list[str], text_channel=None) -> str:
-        """Queue multiple songs as placeholders and resolve them in background."""
-        if not requester_member.voice or not requester_member.voice.channel:
-            return "User is not in a voice channel; cannot play music."
+    async def play(self, guild, requester_member, query: str) -> PlayResult:
+        async def prepare():
+            return [await _resolve_track_async(query, requester_member.display_name)]
+        return await self.enqueue(guild, requester_member, prepare, label=query)
 
-        voice_channel = requester_member.voice.channel
-        player = self.get_player(guild)
+    async def queue_bulk(self, guild, requester_member, queries: list[str], text_channel=None):
+        async def prepare():
+            return [Track(title=query, stream_url="", requested_by=requester_member.display_name,
+                          webpage_url="", resolved=False, query=query) for query in queries]
+        return await self.enqueue(guild, requester_member, prepare, text_channel=text_channel, label=f"{len(queries)} songs")
 
-        async with self._get_play_lock(guild.id):
-            await player.connect(voice_channel)
-
-            if text_channel and not player.text_channel:
-                player.text_channel = text_channel
-
-            for query in queries:
-                track = Track(
-                    title=query,
-                    stream_url="",
-                    requested_by=requester_member.display_name,
-                    webpage_url="",
-                    resolved=False,
-                    query=query,
-                )
-                player.queue.append(track)
-
-            is_busy = player.has_active_track or (player.is_connected and player.voice_client.is_paused())
-
-            player.start_resolver()
-
-            if not is_busy:
-                player.play_next()
-
-            return f"Added {len(queries)} songs to queue."
-
-    async def queue_playlist(self, guild, requester_member, url: str, text_channel=None) -> str:
-        """Extract playlist entries and queue them as placeholders."""
-        if not requester_member.voice or not requester_member.voice.channel:
-            return "User is not in a voice channel; cannot play music."
-
-        voice_channel = requester_member.voice.channel
-        player = self.get_player(guild)
-
-        try:
-            entries = await asyncio.to_thread(extract_playlist, url, requester_member.display_name)
-        except Exception as e:
-            logger.error(f"[music] playlist extract failed for {url!r}: {e}")
-            return f"Could not load playlist: {e}"
-
-        if not entries:
-            return "No playable tracks found in playlist."
-
-        async with self._get_play_lock(guild.id):
-            await player.connect(voice_channel)
-
-            if text_channel and not player.text_channel:
-                player.text_channel = text_channel
-
-            for track in entries:
-                player.queue.append(track)
-
-            is_busy = player.has_active_track or (player.is_connected and player.voice_client.is_paused())
-
-            player.start_resolver()
-
-            if not is_busy:
-                player.play_next()
-
-            return f"Added {len(entries)} songs from playlist to queue."
+    async def queue_playlist(self, guild, requester_member, url: str, text_channel=None):
+        async def prepare():
+            return await asyncio.to_thread(extract_playlist, url, requester_member.display_name)
+        return await self.enqueue(guild, requester_member, prepare, text_channel=text_channel, label="Playlist")
 
     async def skip(self, guild) -> str:
         player = self.get_player(guild)
-        if not player.is_playing:
-            return "Nothing is playing."
-        skipped = player.current.title if player.current else "current track"
-        player._manual_stop = True
-        player.voice_client.stop_playing()
-        return f"Skipped: {skipped}"
+        track = player.current
+        if track is None:
+            return ActionResult("skip", "failed", "Nothing is playing.")
+        player.playback_attempt += 1
+        player.current = None
+        task = player._entry_tasks.get(track.entry_id)
+        if task:
+            task.cancel()
+        stop_music(player.voice_client)
+        player.operations.revision += 1
+        player.play_next()
+        return ActionResult("skip", "completed", f"Skipped: {track.title}")
 
     async def restart(self, guild) -> str:
         player = self.get_player(guild)
-        if not player.current:
-            return "Nothing is playing."
-        player._manual_stop = True
-        player.queue.appendleft(player.current)
-        player.voice_client.stop_playing()
-        return f"Restarting: {player.current.title}"
+        track = player.current
+        if track is None:
+            return ActionResult("restart", "failed", "Nothing is playing.")
+        player.queue.appendleft(track)
+        await self.skip(guild)
+        return ActionResult("restart", "completed", f"Restarting: {track.title}")
 
     async def pause(self, guild) -> str:
         player = self.get_player(guild)
         if not player.is_playing:
-            return "Nothing is playing."
+            return ActionResult('pause', 'failed', "Nothing is playing.")
         if player.current and player.current.paused_at is None:
             player.current.paused_at = time.time()
-        player.voice_client.pause()
-        return "Paused."
+        pause_music(player.voice_client)
+        return ActionResult('pause', 'completed', "Paused.")
 
     async def resume(self, guild) -> str:
         player = self.get_player(guild)
-        if not player.is_connected or not player.voice_client.is_paused():
-            return "Nothing is paused."
+        if not player.is_connected or not music_paused(player.voice_client):
+            return ActionResult('resume', 'failed', "Nothing is paused.")
         if player.current and player.current.paused_at is not None:
             player.current.total_paused += time.time() - player.current.paused_at
             player.current.paused_at = None
-        player.voice_client.resume()
-        return "Resumed."
+        pause_music(player.voice_client, False)
+        return ActionResult('resume', 'completed', "Resumed.")
 
     async def stop(self, guild) -> str:
         player = self.get_player(guild)
         had_pending_request = player.has_pending_play_requests
         if not player.is_connected and not had_pending_request:
-            return "Bot is not in a voice channel."
+            return ActionResult('stop', 'failed', "Bot is not in a voice channel.")
+        self._operations(player).invalidate()
         player._playback_generation += 1
+        player._cancel_entry_tasks()
         if player._start_when_free_task:
             player._start_when_free_task.cancel()
             player._start_when_free_task = None
-        if player._now_playing_view:
-            await player._now_playing_view.on_queue_empty()
-            player._now_playing_view = None
+        view = player._now_playing_view
+        player._now_playing_view = None
         if player._resolver_task:
             player._resolver_task.cancel()
             player._resolver_task = None
         player._manual_stop = True
         player.queue.clear()
         if player.is_playing or (
-            player.voice_client is not None and player.voice_client.is_paused()
+            player.voice_client is not None and music_paused(player.voice_client)
         ):
-            player.voice_client.stop_playing()
+            stop_music(player.voice_client)
         player.current = None
         player._schedule_idle_check()
-        return "Stopped and cleared the queue."
+        self._operations(player).revision += 1
+        from music.identity import clarifications
+        clarifications.clear_guild(guild.id)
+        if view:
+            await view.on_queue_empty()
+        return ActionResult('stop', 'completed', "Stopped and cleared the queue.")
 
     async def leave(self, guild) -> str:
         player = self.get_player(guild)
         if not player.is_connected:
-            return "Bot is not in a voice channel."
+            return ActionResult('leave', 'failed', "Bot is not in a voice channel.")
         await player.disconnect()
-        return "Left the voice channel."
+        return ActionResult('leave', 'completed', "Left the voice channel.")
 
     async def now_playing(self, guild) -> str:
         player = self.get_player(guild)
@@ -845,56 +910,100 @@ class VoiceManager:
 
     async def get_queue(self, guild) -> str:
         player = self.get_player(guild)
-        if not player.queue and not player.current:
+        pending = self._operations(player).pending
+        if not player.queue and not player.current and not pending:
             return "Queue is empty."
         lines = []
         if player.current:
             lines.append(f"Now: {player.current.title}")
         for i, track in enumerate(player.queue, start=1):
             lines.append(f"{i}. {track.title}")
+        for operation in pending.values():
+            if not operation.cancelled.is_set():
+                lines.append(f"Preparing [{operation.operation_id}]: {operation.label}")
         return "\n".join(lines)
+
+    async def cancel_pending(self, guild, operation_id):
+        cancelled = self._operations(self.get_player(guild)).cancel(operation_id)
+        return ActionResult("delete_track", "completed" if cancelled else "failed",
+                            "Cancelled the pending request." if cancelled else "That request is no longer pending.")
 
     async def toggle_loop(self, guild) -> bool:
         player = self.get_player(guild)
         player._loop = not player._loop
+        self._operations(player).revision += 1
         return player._loop
 
     async def shuffle(self, guild) -> str:
         player = self.get_player(guild)
         if len(player.queue) < 2:
-            return "Not enough songs in queue to shuffle."
+            return ActionResult('shuffle', 'failed', "Not enough songs in queue to shuffle.")
         queue_list = list(player.queue)
         random.shuffle(queue_list)
         player.queue = deque(queue_list)
+        self._operations(player).revision += 1
         player.start_resolver()
-        return f"Shuffled {len(queue_list)} songs."
+        return ActionResult('shuffle', 'completed', f"Shuffled {len(queue_list)} songs.")
 
     async def move_track(self, guild, from_pos: int, to_pos: int) -> str:
         player = self.get_player(guild)
         if not player.queue:
-            return "Queue is empty."
+            return ActionResult('move_track', 'failed', "Queue is empty.")
         queue_list = list(player.queue)
         max_pos = len(queue_list)
         if from_pos < 1 or from_pos > max_pos:
-            return f"Invalid position {from_pos}. Queue has {max_pos} songs."
+            return ActionResult('move_track', 'failed', f"Invalid position {from_pos}. Queue has {max_pos} songs.")
         if to_pos < 1 or to_pos > max_pos:
-            return f"Invalid position {to_pos}. Queue has {max_pos} songs."
+            return ActionResult('move_track', 'failed', f"Invalid position {to_pos}. Queue has {max_pos} songs.")
         track = queue_list.pop(from_pos - 1)
         queue_list.insert(to_pos - 1, track)
         player.queue = deque(queue_list)
-        return f"Moved '{track.title}' from position {from_pos} to {to_pos}."
+        self._operations(player).revision += 1
+        return ActionResult('move_track', 'completed', f"Moved '{track.title}' from position {from_pos} to {to_pos}.")
+
+    async def delete_entries(self, guild, entry_ids: list[str], *, revision=None):
+        player = self.get_player(guild)
+        operations = self._operations(player)
+        if revision is not None and revision != operations.revision:
+            return ActionResult('delete_entries', 'failed', "The queue changed; please select the track again.")
+        selected = set(entry_ids)
+        entries = [track for track in player.queue if track.entry_id in selected]
+        if len(entries) != len(selected):
+            return ActionResult('delete_entries', 'failed', "The selected track is no longer in the queue.")
+        player.queue = deque(track for track in player.queue if track.entry_id not in selected)
+        operations.revision += 1
+        return ActionResult('delete_entries', 'completed', "Removed: " + ", ".join(track.title for track in entries))
+
+    async def undo(self, guild):
+        player = self.get_player(guild)
+        operations = self._operations(player)
+        if operations.cancel_latest():
+            return ActionResult('undo', 'completed', "Cancelled the most recently requested song.")
+        if player.queue:
+            player.queue.pop()
+            operations.revision += 1
+            return ActionResult('undo', 'completed', "Deleted the most recently requested song.")
+        if player.current:
+            if player.voice_client and getattr(player, "is_connected", False):
+                await self.skip(guild)
+            else:
+                player.current = None
+            operations.revision += 1
+            return ActionResult('undo', 'completed', "Deleted the most recently requested song.")
+        return ActionResult('undo', 'failed', "There is no recent song request to undo.")
 
     async def delete_track(self, guild, position: int) -> str:
         player = self.get_player(guild)
         if not player.queue:
-            return "Queue is empty."
+            return ActionResult('delete_track', 'failed', "Queue is empty.")
         queue_list = list(player.queue)
         max_pos = len(queue_list)
         if position < 1 or position > max_pos:
-            return f"Invalid position {position}. Queue has {max_pos} songs."
+            return ActionResult('delete_track', 'failed', f"Invalid position {position}. Queue has {max_pos} songs.")
         track = queue_list.pop(position - 1)
         player.queue = deque(queue_list)
-        return f"Removed '{track.title}' from the queue."
+        self._operations(player).revision += 1
+        return ActionResult('delete_track', 'completed', f"Removed '{track.title}' from the queue.")
 
 
 async def _post_now_playing_for_track(player, track):

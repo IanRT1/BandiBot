@@ -24,22 +24,24 @@ def test_stop_clears_looping_playback_and_ignores_late_audio_callback(monkeypatc
         voice = SimpleNamespace(
             client=SimpleNamespace(loop=asyncio.get_running_loop()),
             is_connected=lambda: True, is_playing=lambda: False,
-            is_paused=lambda: paused, stop_playing=Mock(),
+            is_paused=lambda: False, stop_playing=Mock(), source=None,
             play=lambda source, after: callbacks.append(after),
         )
         player.voice_client = voice
         player._loop = True
         monkeypatch.setattr(listener.voice_listener_manager, "get_session", lambda guild: None)
-        monkeypatch.setattr(music.discord, "FFmpegPCMAudio", lambda *a, **kw: object())
+        monkeypatch.setattr(music.discord, "FFmpegPCMAudio", lambda *a, **kw: SimpleNamespace(cleanup=lambda: None))
         monkeypatch.setattr(music.discord, "PCMVolumeTransformer", lambda source, volume: source)
         monkeypatch.setattr(tts, "MixerSource", lambda source, clip_buffer: source)
         monkeypatch.setattr(player, "start_resolver", lambda: None)
         player._play_resolved(Track("song", "stream", "user", "video"))
-        voice.is_playing = lambda: not paused
+        voice.is_playing = lambda: True
+        voice._bandibot_output.source.music_paused = paused
         await manager.stop(guild)
         callbacks[0](None)  # Discord's audio thread may finish after stop returns.
         await asyncio.sleep(0)
-        voice.stop_playing.assert_called_once()
+        voice.stop_playing.assert_not_called()
+        assert voice._bandibot_output.source.music is None
         assert player.current is None
         assert not player.queue
         assert len(callbacks) == 1
@@ -90,8 +92,14 @@ def test_pending_resolution_cannot_restart_invalidated_playback(monkeypatch, act
         release.set()
         await asyncio.wait_for(asyncio.gather(*tasks), 1)
         await asyncio.sleep(0)  # Drain playback callbacks queued by resolution.
-        assert callbacks == []
-        assert player.current is None
+        if action == "recover":
+            # Recovery preserves accepted music, but only the NEW attempt may complete.
+            assert len(callbacks) == 1
+            assert callbacks[0] is player.current
+            assert callbacks[0].title == "resolved"
+        else:
+            assert callbacks == []
+            assert player.current is None
         assert not player.queue
 
     asyncio.run(run())

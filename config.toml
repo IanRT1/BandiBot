@@ -1,0 +1,16 @@
+# Non-secret runtime settings. Restart BandiBot after editing.
+# Loaded from the runtime directory (working directory by default).
+# Missing settings use the defaults shown here. Credentials stay in .env.
+
+[music]
+operation_timeout_seconds = 40.0
+prepare_concurrency = 3
+pending_limit = 32
+identity_review_timeout_seconds = 8.0
+clarification_timeout_seconds = 120.0
+
+[logging]
+# Console verbosity. Session logs retain diagnostic detail.
+level = "INFO"
+# Set false to exclude speaker names and message/response text from logs.
+sensitive_content = true

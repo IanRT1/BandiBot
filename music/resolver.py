@@ -47,6 +47,7 @@ from core.config import (
     YOUTUBE_REMOTE_COMPONENTS,
 )
 from music.tracks import Track
+from music.identity import IdentityReviewRequired
 
 logger = logging.getLogger(__name__)
 
@@ -228,6 +229,7 @@ def resolve_track(
     query: str,
     requested_by: str,
     exclude_webpage_urls: set[str] | None = None,
+    *, require_identity_review: bool = False,
 ) -> Track:
     _log_ytdlp_config_once()
     query = query.strip()
@@ -242,7 +244,7 @@ def resolve_track(
     if exclude_webpage_urls:
         scored_entries = _filter_weak_retry_entries(scored_entries, query_lower)
     if not scored_entries:
-        raise Exception("No playable results found.")
+        raise IdentityReviewRequired(query, [])
 
     candidate_entries = list(scored_entries)
     best_score, best = max(candidate_entries, key=lambda item: item[0])
@@ -262,9 +264,16 @@ def resolve_track(
         if retry_scored_entries:
             candidate_entries.extend(retry_scored_entries)
 
-    candidate_entries = _filter_irrelevant_entries(candidate_entries, query_lower)
+    candidates = _dedupe_scored_entries(candidate_entries)
+    if require_identity_review:
+        raise IdentityReviewRequired(query, candidates)
+    candidate_entries = _supported_identity_entries(candidates, query_lower)
     if not candidate_entries:
-        raise Exception("No sufficiently relevant playable results found.")
+        raise IdentityReviewRequired(query, candidates)
+    return resolve_candidates(candidate_entries, query, requested_by)
+
+
+def resolve_candidates(candidate_entries, query, requested_by):
 
     _log_candidate_scores(candidate_entries)
 
@@ -281,14 +290,15 @@ def resolve_track(
         winner_candidate.get("title", "?"),
         winner_candidate.get("uploader") or winner_candidate.get("channel") or "?",
     )
+    title, artist = _recording_labels(best)
     return Track(
-        title=best.get("title", "Unknown title"),
+        title=title,
         stream_url=best["url"],
         requested_by=requested_by,
         webpage_url=best.get("webpage_url", ""),
         duration=best.get("duration"),
         thumbnail=best.get("thumbnail"),
-        artist=best.get("uploader") or best.get("channel"),
+        artist=artist,
         http_headers=best.get("http_headers") or {},
         query=query,
     )
@@ -317,6 +327,22 @@ def _direct_video_url(query: str) -> str | None:
     return None
 
 
+def _recording_labels(info: dict) -> tuple[str, str | None]:
+    """Prefer recording metadata; an upload channel is not an artist field."""
+    artist = info.get("artist")
+    if not artist and isinstance(info.get("artists"), list):
+        artist = ", ".join(value for value in info["artists"] if isinstance(value, str) and value)
+    title = info.get("track") or info.get("title") or "Unknown title"
+    # Remove a duplicated artist prefix only when actual artist metadata agrees.
+    if artist and not info.get("track"):
+        for separator in (" - ", " – ", " — "):
+            prefix, found, remainder = title.partition(separator)
+            if found and prefix.casefold().strip() == artist.casefold().strip():
+                title = remainder.strip()
+                break
+    return title, artist or None
+
+
 def _resolve_direct_url(url: str, requested_by: str) -> Track:
     logger.debug(f"  [yt-dlp] starting resolution for {url!r}")
     t = time.time()
@@ -324,16 +350,18 @@ def _resolve_direct_url(url: str, requested_by: str) -> Track:
     logger.debug(f"  [yt-dlp] resolved in {time.time() - t:.2f}s")
 
     logger.debug(f"  [yt-dlp] winner title={info.get('title', '?')!r}")
+    title, artist = _recording_labels(info)
     return Track(
-        title=info.get("title", "Unknown title"),
+        title=title,
         stream_url=info["url"],
         requested_by=requested_by,
         webpage_url=info.get("webpage_url", url),
         duration=info.get("duration"),
         thumbnail=info.get("thumbnail"),
-        artist=info.get("uploader") or info.get("channel"),
+        artist=artist,
         http_headers=info.get("http_headers") or {},
         query=url,
+        source_kind="direct",
     )
 
 
@@ -497,6 +525,29 @@ def _filter_weak_retry_entries(
     if skipped:
         logger.debug(f"  [yt-dlp] skipped {skipped} weak retry candidate(s)")
     return filtered
+
+
+def _supported_identity_entries(scored_entries, query_lower):
+    """Exact identity evidence fast path. Uncertain spelling goes to review.
+
+    All substantive request tokens must be supported, including adjacent joined
+    spellings. Upload quality never compensates for missing identity evidence.
+    """
+    words = [word for word in _tokens(query_lower) if word not in _QUERY_FILLER_TOKENS]
+    if not words:
+        return []
+    accepted = []
+    for score, entry in scored_entries:
+        tokens = set(_tokens(f"{entry.get('title') or ''} {entry.get('uploader') or entry.get('channel') or ''}"))
+        covered = {index for index, word in enumerate(words) if word in tokens}
+        for size in (2, 3):
+            for index in range(len(words) - size + 1):
+                joined = "".join(words[index:index + size])
+                if joined in tokens:
+                    covered.update(range(index, index + size))
+        if len(covered) == len(words) and not _has_unrequested_bad_markers(entry, query_lower):
+            accepted.append((score, entry))
+    return accepted
 
 
 def _filter_irrelevant_entries(

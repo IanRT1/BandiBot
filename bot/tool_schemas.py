@@ -21,8 +21,7 @@ MUSIC_TOOLS = [
             "name": "play_music",
             "description": (
                 "Play a single song or audio in the user's current voice channel. "
-                "Reason about the user's request and pass a clean YouTube search query, not the raw command. "
-                "Remove command words such as play, queue, put on, pon, reproduce, or add. "
+                "Separate the requested song identity from the command intent into the song fields. "
                 "Keep the song title, artist, featured artist, version/remix/live/remaster clues, and album clues when useful. "
                 "If the user gives a plausible song title plus artist, preserve those words literally. "
                 "Song titles can contain command-like words such as stop, pause, play, skip, or start from scratch; "
@@ -38,17 +37,20 @@ MUSIC_TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": (
-                            "Cleaned YouTube search query containing only the likely title/artist/version terms. "
-                            "Do not include wake words, user names, or command verbs. "
-                            "When unsure, prefer the literal requested title and artist over a guessed catalog match. "
-                            "A bare 11-character YouTube video ID must be passed exactly as written."
-                        ),
-                    }
+                    "song": {
+                        "type": "object",
+                        "description": "Requested media identity, not the instruction to play/add it. Preserve title words even if they resemble commands. Do not guess missing metadata; use empty strings.",
+                        "properties": {
+                            "title": {"type": "string", "description": "Requested song title only, excluding the surrounding command. Empty for a direct source or artist-only request."},
+                            "artist": {"type": "string", "description": "Requested artist(s), or empty if unspecified."},
+                            "version": {"type": "string", "description": "Only explicitly requested version, remix, live, remaster or album details; otherwise empty."},
+                            "source": {"type": "string", "description": "Exact user-supplied YouTube URL or video ID. Otherwise empty. When set, leave all other fields empty."},
+                        },
+                        "required": ["title", "artist", "version", "source"],
+                        "additionalProperties": False,
+                    },
                 },
-                "required": ["query"],
+                "required": ["song"],
             },
         },
     },
@@ -312,6 +314,37 @@ WEB_SEARCH_TOOL = [
     }
 ]
 
+MUSIC_TOOLS.append({
+    "type": "function", "function": {
+        "name": "select_song_candidate",
+        "description": "Resolve this user's pending song clarification only when the CURRENT message selects a listed candidate. Use its exact candidate_id from pending context.",
+        "parameters": {"type": "object", "properties": {
+            "candidate_id": {"type": "string"},
+        }, "required": ["candidate_id"]},
+    },
+})
+
+# The interpreter chooses presentation language; the executor owns status wording.
+for _tool in MUSIC_TOOLS:
+    _tool["function"]["parameters"]["properties"]["response_language"] = {
+        "type": "string", "enum": ["en", "es"],
+        "description": "Language for the action receipt, matching the user's request.",
+    }
+    _tool["function"]["parameters"].setdefault("required", []).append("response_language")
+
+for _tool in MUSIC_TOOLS:
+    if _tool["function"]["name"] == "delete_track":
+        _tool["function"]["parameters"]["properties"]["pending_request_id"] = {
+            "type": "string", "description": "Exact Preparing request ID from the queue snapshot, to cancel a request still loading.",
+        }
+    if _tool["function"]["name"] in {"stop_music", "delete_track", "undo_last_song_request"}:
+        _parameters = _tool["function"]["parameters"]
+        _parameters["properties"]["intent_evidence"] = {
+            "type": "string",
+            "description": "Exact quote from the CURRENT request authorizing this action. Do not quote song titles as control intent. If action or target is ambiguous, ask a clarification instead.",
+        }
+        _parameters.setdefault("required", []).append("intent_evidence")
+
 ALL_TOOLS = MUSIC_TOOLS + GET_MEMBER_ACTIVITY_TOOL + GET_SERVER_INFO_TOOL + WEB_SEARCH_TOOL
 
 VOICE_TOOLS = [
@@ -352,7 +385,14 @@ _QUESTION_RE = re.compile(
 )
 
 
-def select_tools_for_request(
+def select_tools_for_request(request: str, **options):
+    """Route requests only among capabilities enabled at startup."""
+    from core.capabilities import available_tools
+
+    return available_tools(_select_tools_for_request(request, **options))
+
+
+def _select_tools_for_request(
     request: str,
     *,
     lore_is_confident: bool = False,
@@ -372,10 +412,7 @@ def select_tools_for_request(
         names = {tool["function"]["name"] for tool in selected}
         required = list(WEB_SEARCH_TOOL) if allow_live_search else []
         if allow_song_requests:
-            required.extend(
-                tool for tool in MUSIC_TOOLS
-                if tool["function"]["name"] in {"play_music", "undo_last_song_request"}
-            )
+            required.extend(MUSIC_TOOLS)
         return selected + [tool for tool in required if tool["function"]["name"] not in names]
 
     text = request or ""
@@ -428,7 +465,7 @@ def tools_without_server_info():
     """Return tools for prompts whose server lore was already retrieved."""
     return [
         tool for tool in ALL_TOOLS
-        if tool["function"]["name"] != "get_server_info"
+        if tool["function"]["name"] != "get_server_info" and _tool_available(tool)
     ]
 
 
@@ -437,7 +474,7 @@ def tools_without_context_lookups():
     excluded = {"get_server_info", "get_member_activity"}
     return [
         tool for tool in ALL_TOOLS
-        if tool["function"]["name"] not in excluded
+        if tool["function"]["name"] not in excluded and _tool_available(tool)
     ]
 
 
@@ -456,3 +493,9 @@ def tools_without_context_lookups_or_web_search():
         tool for tool in ALL_TOOLS
         if tool["function"]["name"] not in excluded
     ]
+
+
+def _tool_available(tool):
+    from core.capabilities import tool_available
+
+    return tool_available(tool["function"]["name"])

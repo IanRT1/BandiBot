@@ -8,6 +8,21 @@ import voice.listener as listener
 from voice.listener import VoiceListenerManager
 
 
+def test_delayed_old_disconnect_cannot_remove_replacement_session(monkeypatch):
+    async def run():
+        manager = VoiceListenerManager()
+        guild = SimpleNamespace(id=1)
+        old, replacement = SimpleNamespace(), SimpleNamespace()
+        from unittest.mock import AsyncMock
+        replacement.stop = AsyncMock()
+        manager._sessions[1] = replacement
+        monkeypatch.setattr(listener, "VOICE_ENABLED", True)
+        await manager.stop_listening(guild, expected_session=old)
+        assert manager.get_session(guild) is replacement
+        replacement.stop.assert_not_awaited()
+    asyncio.run(run())
+
+
 def test_music_shutdown_disconnects_players_and_clears_state():
     manager = VoiceManager()
     first = SimpleNamespace(guild=SimpleNamespace(name="first"))

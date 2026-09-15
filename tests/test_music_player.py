@@ -239,6 +239,26 @@ def test_initial_now_playing_send_is_deleted_if_track_stops_while_posting(monkey
     asyncio.run(run())
 
 
+def test_old_queue_empty_completion_does_not_clear_new_banner():
+    from music.now_playing import NowPlayingView
+
+    async def run():
+        old_message = SimpleNamespace(delete=AsyncMock(), channel=SimpleNamespace(send=AsyncMock()))
+        new_message = object()
+        player = SimpleNamespace(current=None, queue=deque(), now_playing_message=old_message,
+                                 operations=SimpleNamespace(revision=1))
+        async def stop_updates():
+            player.current = _track("new")
+            player.operations.revision += 1
+            player.now_playing_message = new_message
+        view = SimpleNamespace(message=old_message, player=player, stop_updates=stop_updates)
+        await NowPlayingView.on_queue_empty(view)
+        assert player.now_playing_message is new_message
+        old_message.delete.assert_awaited_once()
+        old_message.channel.send.assert_not_awaited()
+    asyncio.run(run())
+
+
 def test_voice_recovery_preserves_current_track_before_rebinding():
     player = GuildPlayer(SimpleNamespace(name="Test Guild"))
     current = _track("Current track")

@@ -35,6 +35,7 @@ class PreflightResult:
     summary: tuple[str, ...]
     warnings: tuple[str, ...]
     errors: tuple[str, ...]
+    enabled_optional_tools: frozenset[str] = frozenset()
 
 
 def run_preflight(
@@ -48,6 +49,7 @@ def run_preflight(
     summary: list[str] = []
     warnings: list[str] = []
     errors: list[str] = []
+    enabled_optional_tools: set[str] = set()
 
     missing_keys = [key for key in _REQUIRED_KEYS if not env.get(key)]
     if missing_keys:
@@ -102,6 +104,11 @@ def run_preflight(
     else:
         summary.append("context=ok")
 
+    gemini_key = env.get("GEMINI_API_KEY", "").strip()
+    if not errors and gemini_key:
+        enabled_optional_tools.add("web_search")
+    summary.append("web-search=enabled" if enabled_optional_tools else "web-search=disabled")
+
     if not errors and warmup is not None:
         started = time.perf_counter()
         try:
@@ -117,6 +124,7 @@ def run_preflight(
         summary=tuple(summary),
         warnings=tuple(warnings),
         errors=tuple(errors),
+        enabled_optional_tools=frozenset(enabled_optional_tools),
     )
     if result.ok:
         logger.info("[startup] preflight passed | %s", " | ".join(result.summary))

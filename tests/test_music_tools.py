@@ -164,7 +164,7 @@ def test_resolver_rejects_playable_but_irrelevant_results():
     ]
 
 
-def test_remove_current_song_routes_to_skip(monkeypatch):
+def test_delete_without_target_does_not_mutate_current_or_upcoming(monkeypatch):
     import bot.tool_executor as executor
 
     player = SimpleNamespace(current=_track("Current"), queue=deque([_track("Next")] ))
@@ -178,11 +178,11 @@ def test_remove_current_song_routes_to_skip(monkeypatch):
     monkeypatch.setattr(executor.voice_manager, "skip", skip)
 
     result = asyncio.run(
-        executor._handle_delete_track(_message("¿Puedes quitar la canción?"), {})
+        executor._handle_delete_track(_message("¿Puedes quitar la canción?"), {"intent_evidence": "quitar la canción"})
     )
 
-    assert result == "Skipped: Current"
-    assert skipped
+    assert result.startswith("Please identify")
+    assert not skipped
     assert [track.title for track in player.queue] == ["Next"]
 
 
@@ -199,7 +199,7 @@ def test_queue_position_removes_only_upcoming_track(monkeypatch):
     result = asyncio.run(
         executor._handle_delete_track(
             _message("quita la canción número 2 de la cola"),
-            {"positions": [2]},
+            {"positions": [2], "intent_evidence": "quita la canción número 2 de la cola"},
         )
     )
 
@@ -322,7 +322,7 @@ def test_music_control_confirmation_uses_actual_tool_result(monkeypatch):
         )
     )
 
-    assert result == "Removed the queued song."
+    assert result == "Removed one song: 'Example'"
 
 
 def test_undo_confirmation_is_casual_and_does_not_include_song_details(monkeypatch):
@@ -344,7 +344,7 @@ def test_undo_confirmation_is_casual_and_does_not_include_song_details(monkeypat
         )
     )
 
-    assert result == "Got it, I deleted it."
+    assert result == "Deleted the most recently requested song."
 
 
 def test_skip_confirmation_is_brief_and_does_not_include_song_details(monkeypatch):
@@ -366,7 +366,7 @@ def test_skip_confirmation_is_brief_and_does_not_include_song_details(monkeypatc
         )
     )
 
-    assert result == "Okay, skipped it."
+    assert result == "Skipped: A song with a long title."
 
 
 def test_undo_last_song_request_removes_newest_queued_song(monkeypatch):
@@ -377,7 +377,7 @@ def test_undo_last_song_request_removes_newest_queued_song(monkeypatch):
     monkeypatch.setattr(executor.voice_manager, "get_player", lambda guild: player)
 
     result = asyncio.run(
-        executor._handle_undo_last_song_request(_message("wrong song"), {})
+        executor._handle_undo_last_song_request(_message("wrong song"), {"intent_evidence": "wrong song"})
     )
 
     assert result == "Deleted the most recently requested song."
@@ -394,7 +394,7 @@ def test_undo_last_song_request_removes_only_current_song_when_queue_is_empty(mo
     monkeypatch.setattr(executor.voice_manager, "get_player", lambda guild: player)
 
     result = asyncio.run(
-        executor._handle_undo_last_song_request(_message("canción equivocada"), {})
+        executor._handle_undo_last_song_request(_message("canción equivocada"), {"intent_evidence": "canción equivocada"})
     )
 
     assert result == "Deleted the most recently requested song."

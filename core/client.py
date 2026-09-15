@@ -115,7 +115,9 @@ import asyncio
 from dotenv import load_dotenv
 
 load_dotenv()
-console_level = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO)
+from core.config import LOG_LEVEL
+
+console_level = getattr(logging, LOG_LEVEL)
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -155,10 +157,15 @@ session_handler.setFormatter(logging.Formatter(
 root_logger.addHandler(session_handler)
 
 logger.info("[startup] initializing BandiBot")
-if not run_preflight(warmup=warm_retrieval).ok:
+preflight_result = run_preflight(warmup=warm_retrieval)
+if not preflight_result.ok:
     logger.critical("[startup] preflight failed; bot not started")
     instance_lock.release()
     raise SystemExit(1)
+
+from core.capabilities import configure_optional_tools
+
+configure_optional_tools(preflight_result.enabled_optional_tools)
 
 logging.getLogger("torio").setLevel(logging.WARNING)
 logging.getLogger("torchaudio").setLevel(logging.WARNING)
@@ -196,6 +203,8 @@ class BandiBotClient(discord.Client):
         if not self._shutdown_started:
             self._shutdown_started = True
             logger.info("[shutdown] stopping voice listeners and music players")
+            voice_manager.begin_shutdown()
+            voice_listener_manager.begin_shutdown()
             await voice_listener_manager.shutdown()
             await voice_manager.shutdown()
         await super().close()
@@ -242,7 +251,13 @@ async def on_voice_state_update(member, before, after):
                 member.guild, voice_channel, client, loop
             )
         elif after.channel is None:
-            await voice_listener_manager.stop_listening(member.guild)
+            # A disconnect event from recovery can wait behind the lifecycle
+            # lock until the replacement session is already connected.
+            session = voice_listener_manager.get_session(member.guild)
+            if session is not None:
+                voice_client = session._voice_client
+                if voice_client is None or not voice_client.is_connected():
+                    await voice_listener_manager.stop_listening(member.guild, expected_session=session)
         return
 
     guild = member.guild

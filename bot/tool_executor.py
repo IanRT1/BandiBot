@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 def is_music_tool(name: str) -> bool:
     return name in {
-        "play_music", "skip_track", "pause_music", "resume_music",
+        "play_music", "select_song_candidate", "skip_track", "pause_music", "resume_music",
         "stop_music", "move_track", "delete_track", "queue_bulk",
         "undo_last_song_request",
     }
@@ -49,7 +49,14 @@ async def _handle_play_music(message, args):
     if not player.text_channel and message.channel:
         player.text_channel = message.channel
 
-    query = args.get("query", "")
+    from music.requests import song_query
+    from music.identity import clarifications
+    from bot.interactions import current_request
+
+    context = current_request.get()
+    original_text = context.original_text if context else getattr(message, "content", None)
+    query = song_query(args["song"], original_text=original_text) if "song" in args else args.get("query", "")
+    clarifications.clear(getattr(guild, "id", None), getattr(requester, "id", None))
     search_msg = None
     if is_voice and message.channel:
         try:
@@ -58,10 +65,9 @@ async def _handle_play_music(message, args):
             pass
 
     try:
-        result = await asyncio.wait_for(
-            voice_manager.play(guild, requester, query),
-            timeout=30.0,
-        )
+        # The controller owns the deadline and commit cancellation together.
+        # An outer wait_for could report failure while shielded work still commits.
+        result = await voice_manager.play(guild, requester, query)
     except asyncio.TimeoutError:
         if search_msg:
             try:
@@ -120,7 +126,7 @@ async def _handle_queue_bulk(message, args):
     if message.channel:
         from music.now_playing import update_now_playing_queue
         await update_now_playing_queue(player, len(player.queue))
-    return result
+    return json.dumps(result.to_dict(), ensure_ascii=False)
 
 
 async def _handle_skip_track(message, args):
@@ -136,7 +142,7 @@ async def _handle_resume_music(message, args):
 
 
 async def _handle_stop_music(message, args):
-    if not _has_explicit_stop_intent(message):
+    if not _action_is_grounded(message, args):
         logger.warning(
             "  stop_music blocked: message did not explicitly ask to stop or clear music"
         )
@@ -154,6 +160,7 @@ async def _handle_leave_voice(message, args):
     # Voice commands speak the goodbye before leaving; the voice pipeline owns
     # the final disconnect after that response completes.
     if _is_voice_proxy(message):
+        player.schedule_leave()
         return "Leaving the voice channel."
 
     await voice_listener_manager.stop_listening(message.guild)
@@ -170,6 +177,11 @@ async def _handle_get_queue(message, args):
 
 
 async def _handle_move_track(message, args):
+    from bot.interactions import current_request
+    context = current_request.get()
+    player = voice_manager.get_player(message.guild)
+    if context and context.queue_revision is not None and context.queue_revision != player.operations.revision:
+        return "The queue changed; please select the track again."
     from_pos = args.get("from_position")
     to_pos = args.get("to_position")
     if from_pos is None:
@@ -187,38 +199,28 @@ async def _handle_move_track(message, args):
 
 
 async def _handle_delete_track(message, args):
-    if not _has_explicit_delete_intent(message):
+    if not _action_is_grounded(message, args):
         return "Delete cancelled: the message did not explicitly ask to remove a track."
+
+    if args.get("pending_request_id"):
+        return await voice_manager.cancel_pending(message.guild, args["pending_request_id"])
 
     player = voice_manager.get_player(message.guild)
     queue_list = list(player.queue)
     positions = args.get("positions")
     track_name = args.get("track_name")
 
-    # Natural language such as "quitar la canción" refers to the active song
-    # unless the user explicitly identifies an upcoming queue item.  The
-    # model normally selects skip_track after the schema guidance, but keep
-    # this guard here so a delete_track call cannot silently leave playback
-    # unchanged when the intent is clearly to skip the current track.
-    if (
-        player.current
-        and not positions
-        and not track_name
-        and _has_current_track_skip_intent(message)
-    ):
-        return await voice_manager.skip(message.guild)
+    if not positions and not args.get("position") and not track_name:
+        return "Please identify an upcoming queue entry; use skip for the current track."
 
     if not positions:
         position = args.get("position")
         if position is None:
             query = (track_name or "").lower()
-            if query in ("last", "last song", "última", "última canción"):
-                position = len(queue_list)
-            else:
-                match = next((i + 1 for i, t in enumerate(queue_list) if query in t.title.lower()), None)
-                if not match:
-                    return f"Could not find '{query}' in queue."
-                position = match
+            matches = [i + 1 for i, track in enumerate(queue_list) if query and query in track.title.lower()]
+            if len(matches) != 1:
+                return "Please identify a unique queue entry or its position."
+            position = matches[0]
         positions = [position]
 
     max_pos = len(queue_list)
@@ -226,34 +228,26 @@ async def _handle_delete_track(message, args):
     if invalid:
         return f"Invalid position(s): {invalid}. Queue has {max_pos} songs."
 
-    results = []
-    for pos in sorted(positions, reverse=True):
-        track = queue_list.pop(pos - 1)
-        results.append(track.title)
+    from bot.interactions import current_request
+    context = current_request.get()
+    revision = context.queue_revision if context else None
+    if context and context.queue_entries and (args.get("positions") or args.get("position")):
+        if any(pos > len(context.queue_entries) for pos in positions):
+            return "The queue changed; please select the track again."
+        entry_ids = [context.queue_entries[pos - 1] for pos in sorted(set(positions), reverse=True)]
+    else:
+        entry_ids = [queue_list[pos - 1].entry_id for pos in sorted(set(positions), reverse=True)]
+    result = await voice_manager.delete_entries(message.guild, entry_ids, revision=revision)
 
-    player.queue = deque(queue_list)
-    result = f"Removed {len(results)} song(s): " + ", ".join(f"'{t}'" for t in results)
     if _is_voice_proxy(message) and message.channel:
         await message.channel.send(result)
     return result
 
 
 async def _handle_undo_last_song_request(message, args):
-    """Remove only the newest requested song, including the active song if alone."""
-    player = voice_manager.get_player(message.guild)
-    if player.queue:
-        player.queue.pop()
-        return "Deleted the most recently requested song."
-
-    if player.current:
-        if player.voice_client and player.is_playing:
-            player._manual_stop = True
-            player.voice_client.stop_playing()
-        else:
-            player.current = None
-        return "Deleted the most recently requested song."
-
-    return "There is no recent song request to undo."
+    if not _action_is_grounded(message, args):
+        return "Undo cancelled: the current request did not authorize that action."
+    return await voice_manager.undo(message.guild)
 
 
 async def _handle_join_voice(message, args):
@@ -290,7 +284,20 @@ async def _handle_web_search(message, args):
     return await search_web(args.get("question", ""))
 
 
+async def _handle_select_song_candidate(message, args):
+    from music.identity import clarifications
+    from music.resolver import _entry_webpage_url
+    entry = clarifications.take(message.guild.id, message.author.id, args["candidate_id"])
+    if entry is None:
+        return json.dumps(PlayResult("failed", message="That song choice expired or belongs to another request.").to_dict())
+    url = _entry_webpage_url(entry)
+    if not url:
+        return json.dumps(PlayResult("failed", message="That candidate has no playable source.").to_dict())
+    return await _handle_play_music(message, {"query": url})
+
+
 TOOL_HANDLERS = {
+    "select_song_candidate": _handle_select_song_candidate,
     "play_music": _handle_play_music,
     "queue_bulk": _handle_queue_bulk,
     "skip_track": _handle_skip_track,
@@ -311,16 +318,18 @@ TOOL_HANDLERS = {
 }
 
 _TOOL_ARGUMENT_KEYS = {
-    "play_music": {"query"},
+    "select_song_candidate": {"candidate_id"},
+    "play_music": {"query", "song"},
     "queue_bulk": {"queries", "is_playlist"},
     "move_track": {"from_position", "to_position", "track_name"},
-    "delete_track": {"positions", "position", "track_name"},
+    "delete_track": {"positions", "position", "track_name", "pending_request_id"},
     "undo_last_song_request": set(),
     "get_server_info": {"question"},
     "web_search": {"question"},
 }
 _TOOL_REQUIRED_ARGUMENTS = {
-    "play_music": {"query"},
+    "select_song_candidate": {"candidate_id"},
+    "play_music": set(),
     "queue_bulk": {"queries", "is_playlist"},
     "move_track": {"to_position"},
     "get_server_info": {"question"},
@@ -333,7 +342,9 @@ def _validate_tool_call(name, args) -> str | None:
     if not isinstance(args, dict):
         return "Tool arguments must be an object."
 
-    allowed = _TOOL_ARGUMENT_KEYS.get(name, set())
+    allowed = _TOOL_ARGUMENT_KEYS.get(name, set()) | {"response_language"}
+    if name in {"stop_music", "delete_track", "undo_last_song_request"}:
+        allowed |= {"intent_evidence"}
     unexpected = set(args) - allowed
     if unexpected:
         return f"Unexpected argument(s): {', '.join(sorted(unexpected))}."
@@ -342,8 +353,21 @@ def _validate_tool_call(name, args) -> str | None:
     if missing:
         return f"Missing required argument(s): {', '.join(sorted(missing))}."
 
+    if name == "select_song_candidate":
+        if not isinstance(args["candidate_id"], str) or len(args["candidate_id"]) > 64:
+            return "Invalid candidate ID."
     if name == "play_music":
-        if not isinstance(args["query"], str) or not args["query"].strip():
+        if "song" in args:
+            if "query" in args:
+                return "Use song identity or a legacy query, not both."
+            from music.requests import song_query
+            try:
+                song_query(args["song"])
+            except ValueError as exc:
+                return str(exc)
+            return None
+        # Internal direct-link routing and older callers still supply query.
+        if not isinstance(args.get("query"), str) or not args["query"].strip():
             return "The music query must be a non-empty string."
         if len(args["query"]) > 500:
             return "The music query is too long."
@@ -373,6 +397,8 @@ def _validate_tool_call(name, args) -> str | None:
         ):
             return "track_name must be a string of 500 characters or fewer."
     elif name == "delete_track":
+        if "pending_request_id" in args and (not isinstance(args["pending_request_id"], str) or len(args["pending_request_id"]) > 128):
+            return "Invalid pending request ID."
         if "positions" in args and (
             not isinstance(args["positions"], list)
             or not all(isinstance(position, int) and not isinstance(position, bool) for position in args["positions"])
@@ -403,7 +429,12 @@ async def execute_tool_call(tool_call, message):
         return "Invalid tool name."
     logger.info("[tool] %s", name)
 
-    handler = TOOL_HANDLERS.get(name)
+    if isinstance(args, dict) and args.get("response_language", "en") not in {"en", "es"}:
+        return "Invalid response language."
+
+    from core.capabilities import tool_available
+
+    handler = TOOL_HANDLERS.get(name) if tool_available(name) else None
     if handler is None:
         return f"Unknown tool: {name}"
 
@@ -413,7 +444,8 @@ async def execute_tool_call(tool_call, message):
         return f"Invalid arguments for {name}: {validation_error}"
 
     try:
-        return await handler(message, args)
+        result = await handler(message, args)
+        return json.dumps(result.to_dict(), ensure_ascii=False) if hasattr(result, "to_dict") else result
     except Exception as e:
         logger.error(f"  tool {name} raised: {e}")
         if name == "play_music":
@@ -422,77 +454,11 @@ async def execute_tool_call(tool_call, message):
 
 
 def _is_voice_proxy(message) -> bool:
-    return message.__class__.__name__ == "_FakeMsgProxy"
+    return getattr(message, "origin", None) == "voice"
 
 
-def _has_explicit_delete_intent(message) -> bool:
-    content = getattr(message, "content", "")
-    if not content:
-        return True
-    lowered = content.lower()
-    delete_words = (
-        "remove", "delete", "clear", "drop", "take out", "take off",
-        "quita", "quitar", "borra", "borrar", "elimina", "eliminar",
-        "saca", "sacar",
-    )
-    return any(word in lowered for word in delete_words)
-
-
-def _has_current_track_skip_intent(message) -> bool:
-    """Return true for remove/skip wording aimed at the active track."""
-    content = getattr(message, "content", "")
-    if not content:
-        return False
-    lowered = content.lower()
-
-    # Queue-specific wording means the user wants delete_track instead.
-    if re.search(r"\b(?:queue|cola)\b", lowered):
-        return False
-    if re.search(r"\b(?:position|posici[oó]n|number|n[uú]mero)\b", lowered):
-        return False
-
-    return any(
-        re.search(pattern, lowered)
-        for pattern in (
-            r"\bquitar(?:me)?\s+(?:la\s+)?canci[oó]n\b",
-            r"\bquita(?:me)?\s+(?:la\s+)?canci[oó]n\b",
-            r"\bsaca(?:r)?\s+(?:la\s+)?canci[oó]n\b",
-            r"\b(?:remove|take out|take off)\s+(?:the\s+)?(?:current|this|playing)\s*(?:song|track)?\b",
-        )
-    )
-
-
-def _has_explicit_stop_intent(message) -> bool:
-    content = getattr(message, "content", "")
-    if not content:
-        return False
-
-    lowered = content.lower()
-    starts_as_play_request = re.match(
-        r"^\s*(?:<@!?\d+>\s*)?"
-        r"(?:play|queue|add|put on|pon|poner|reproduce|toca)\b",
-        lowered,
-    )
-    if starts_as_play_request:
-        return False
-
-    stop_patterns = (
-        r"\bstop\b",
-        r"\bstop\s+(?:music|playback|playing|the song|the queue)\b",
-        r"\bclear\s+(?:the\s+)?queue\b",
-        r"\bclear\s+(?:all\s+)?music\b",
-        r"\bempty\s+(?:the\s+)?queue\b",
-        r"\bturn\s+off\s+(?:the\s+)?music\b",
-        r"\bshut\s+up\b",
-        r"\bstfu\b",
-        r"\bpara\b",
-        r"\bparen\b",
-        r"\bdeten(?:er|te|lo|la)?\b",
-        r"\bcancela(?:r)?\b",
-        r"\blimpia\s+(?:la\s+)?cola\b",
-        r"\bvac[ií]a\s+(?:la\s+)?cola\b",
-        r"\bborra\s+(?:la\s+)?cola\b",
-        r"\bquita\s+todo\b",
-        r"\bapaga\s+(?:la\s+)?m[uú]sica\b",
-    )
-    return any(re.search(pattern, lowered) for pattern in stop_patterns)
+def _action_is_grounded(message, args) -> bool:
+    """Validate evidence binding; language interpretation belongs to the model."""
+    evidence = args.get("intent_evidence")
+    return bool(isinstance(evidence, str) and evidence.strip()
+                and evidence.casefold() in (getattr(message, "content", "") or "").casefold())

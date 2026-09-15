@@ -65,6 +65,38 @@ logger = logging.getLogger(__name__)
 
 _INSTRUCTIONS_TEMPLATE = load_context_file("instructions.txt")
 _SERVER_LORE = load_server_lore(OPENAI_MODEL)
+_YOUTUBE_VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
+_YOUTUBE_VIDEO_URL_RE = re.compile(
+    r"https?://(?:www\.)?(?:youtube\.com/watch\?[^\s\])]+|youtu\.be/[A-Za-z0-9_-]{11}(?:\?[^\s\])]+)?)",
+    re.IGNORECASE,
+)
+_PLAY_COMMAND_RE = re.compile(
+    r"\b(?:play|queue|add|pon|ponme|reproduce|reproducir)\b",
+    re.IGNORECASE,
+)
+
+
+def _direct_youtube_tool_response(user_message: str):
+    """Build a deterministic play call for an unambiguous YouTube request."""
+    query = user_message if _YOUTUBE_VIDEO_ID_RE.fullmatch(user_message) else None
+    if query is None and _PLAY_COMMAND_RE.search(user_message):
+        urls = list(dict.fromkeys(_YOUTUBE_VIDEO_URL_RE.findall(user_message)))
+        if len(urls) == 1:
+            query = urls[0]
+    if query is None:
+        return None
+    return {
+        "choices": [{
+            "message": {
+                "content": None,
+                "tool_calls": [{
+                    "id": "direct-youtube-video-id",
+                    "name": "play_music",
+                    "arguments": {"query": query},
+                }],
+            }
+        }]
+    }
 
 
 def _strip_bot_mentions(message, client):
@@ -164,10 +196,30 @@ def build_member_activity_context(guild):
 
 
 def build_instruction(bot_display_name, server_name):
-    return _INSTRUCTIONS_TEMPLATE.format(
+    from core.capabilities import tool_available
+
+    instruction = _INSTRUCTIONS_TEMPLATE.format(
         bot_display_name=bot_display_name,
         server_name=server_name,
-    ) + (
+    )
+    instruction += (
+        "\nFor music requests, the current request overrides earlier failed searches and suggestions. "
+        "If the user repeats or corrects a song title or artist, call play_music again with that identity; "
+        "do not force a choice among earlier results. Search failure does not prove the song or artist does not exist. "
+        "Speech transcripts can contain incorrect punctuation and phonetic names even at high confidence. "
+        "Separate the requested action from the song title semantically: for 'Play, Halo, by Beyonce', "
+        "the title is 'Halo'; for 'play Play That Funky Music by Wild Cherry', the title is 'Play That Funky Music'. "
+        "Do not include the leading action as part of the song title merely because transcription added commas. "
+        "Words that sound like politeness or conversational filler can be the song title. If they occupy the "
+        "title position before an artist name, preserve them as the requested title rather than silently "
+        "turning the request into an artist-only search."
+    )
+    if not tool_available("web_search"):
+        return instruction + (
+            "\nLive web access is unavailable in this session. Do not claim to search "
+            "or verify current information. Be clear when a question requires live information."
+        )
+    return instruction + (
         "\nFor questions requiring current external information, use web_search before answering. "
         "This includes live or recent sports scores, team standings/results, weather, schedules, "
         "prices, and recent news, even when the user does not explicitly request a search. "
@@ -243,7 +295,7 @@ async def handle_bot_mention(message, client):
         ]
 
         player = voice_manager.get_player(message.guild)
-        if player.current or player.queue:
+        if player.current or player.queue or getattr(player, "has_pending_play_requests", False):
             queue_str = await voice_manager.get_queue(message.guild)
             messages.append({"role": "system", "content": f"**Current Queue:**\n{queue_str}\n\nDo NOT re-queue any song already in this list."})
 
@@ -252,19 +304,32 @@ async def handle_bot_mention(message, client):
             {"role": "user", "content": f"[{user_name}] {user_message}"},
         ])
 
+        from music.identity import clarifications
+        pending_choice = clarifications.context(message.guild.id, message.author.id)
+        if pending_choice:
+            messages.append({"role": "system", "content": pending_choice})
+
+        from bot.interactions import request_context
+        interaction_context = request_context(message, user_message, origin="text", player=player)
         t_llm = time.perf_counter()
         available_tools = select_tools_for_request(
             user_message,
             lore_is_confident=has_retrieved_lore,
             has_lore_context=has_lore_context,
             allow_live_search=True,
+            allow_song_requests=True,
         )
 
-        response_data = await send_to_openai(
-            {"messages": messages, "temperature": 0.5},
-            tools=available_tools,
-        )
-        llm_ms = (time.perf_counter() - t_llm) * 1000
+        response_data = _direct_youtube_tool_response(user_message)
+        if response_data is None:
+            response_data = await send_to_openai(
+                {"messages": messages, "temperature": 0.5},
+                tools=available_tools,
+            )
+            llm_ms = (time.perf_counter() - t_llm) * 1000
+        else:
+            logger.debug("[chat] routing bare YouTube video ID directly to play_music")
+            llm_ms = 0.0
 
         if not response_data:
             logger.error(f"  LLM call failed after {llm_ms:.0f}ms")
@@ -281,87 +346,29 @@ async def handle_bot_mention(message, client):
         msg = response_data["choices"][0]["message"]
         tool_calls = msg.get("tool_calls")
 
+        receipts = []
         if tool_calls:
-            called_music = any(is_music_tool(tc["name"]) for tc in tool_calls)
-
-            messages.append({
-                "role": "assistant",
-                "content": msg.get("content"),
-                "tool_calls": [
-                    {
-                        "id": tc["id"],
-                        "type": "function",
-                        "function": {
-                            "name": tc["name"],
-                            "arguments": json.dumps(tc["arguments"]),
-                        },
-                    }
-                    for tc in tool_calls
-                ],
-            })
-
-            for tc in tool_calls:
-                result = await execute_tool_call(tc, message)
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc["id"],
-                    "content": result,
-                })
-
-            if called_music:
-                tool_results = [m["content"] for m in messages if m.get("role") == "tool"]
-                reply_messages = [
-                    {
-                        "role": "system",
-                        "content": (
-                            f"You are {client.user.display_name}, a chill Discord bot. "
-                            f"Respond in the same language the user wrote in. The user wrote: '{user_message}'. Match that language exactly. "
-                            f"Keep it short — one or two sentences max. "
-                            f"The tool result tells you exactly what happened — confirm it confidently, don't ask for clarification."
-                        ),
-                    },
-                    {"role": "user", "content": f"[{user_name}] {user_message}"},
-                    {
-                        "role": "assistant",
-                        "content": None,
-                        "tool_calls": [
-                            {
-                                "id": tc["id"],
-                                "type": "function",
-                                "function": {
-                                    "name": tc["name"],
-                                    "arguments": json.dumps(tc["arguments"]),
-                                },
-                            }
-                            for tc in tool_calls
-                        ],
-                    },
-                    *[{"role": "tool", "tool_call_id": tc["id"], "content": r}
-                    for tc, r in zip(tool_calls, tool_results)],
-                ]
+            from bot.interactions import execute_turn
+            turn = await execute_turn(tool_calls, message, user_message,
+                                      execute_tool_call, is_music_tool, context=interaction_context)
+            messages.extend(turn.messages)
+            receipts = turn.receipts
+            if turn.has_information:
+                messages.append({"role": "system", "content": (
+                    "Answer the informational part of the request. Music action receipts "
+                    "are displayed separately by the application; do not restate or invent them."
+                )})
+                t_llm2 = time.perf_counter()
+                response_data = await send_to_openai({"messages": messages, "temperature": 0.5})
+                llm_ms += (time.perf_counter() - t_llm2) * 1000
+                if not response_data:
+                    response_data = {"choices": [{"message": {"content": "The informational response failed."}}]}
             else:
-                reply_messages = messages
+                response_data = {"choices": [{"message": {"content": ""}}]}
 
-            t_llm2 = time.perf_counter()
-            response_data = await send_to_openai(
-                {"messages": reply_messages, "temperature": 0.5},
-            )
-            llm2_ms = (time.perf_counter() - t_llm2) * 1000
-            llm_ms += llm2_ms
-
-            if not response_data:
-                logger.error(f"  follow-up LLM call failed after {llm2_ms:.0f}ms")
-                try:
-                    await message.reply(
-                        "Hice la acción pero algo falló al armar la respuesta.",
-                        mention_author=False,
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to send error reply: {e}")
-                return
-
-
-        response_text = process_openai_response(data=response_data, message=message, client=client)
+        response_text = ("" if receipts and not turn.has_information else
+                         process_openai_response(data=response_data, message=message, client=client))
+        response_text = "\n".join([*receipts, response_text] if response_text else receipts)
         await send_response_to_channel(message, response_text)
 
     total_ms = (time.perf_counter() - t_start) * 1000
