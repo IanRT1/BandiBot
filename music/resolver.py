@@ -64,14 +64,18 @@ _QUERY_FILLER_TOKENS = {
 }
 
 _REQUESTABLE_VARIANTS = (
-    "live", "remix", "acoustic", "cover", "instrumental", "karaoke",
+    "live", "en vivo", "en directo", "concert", "auditorio",
+    "remix", "acoustic", "cover", "instrumental", "karaoke",
     "slowed", "sped up", "nightcore", "mashup", "extended", "demo",
     "radio edit", "clean", "explicit", "remaster", "remastered",
 )
 
 _VARIANT_PENALTIES = {
     "live": -14,
+    "en vivo": -14,
+    "en directo": -14,
     "concert": -12,
+    "auditorio": -10,
     "remix": -8,
     "mix": -4,
     "acoustic": -6,
@@ -270,6 +274,17 @@ def resolve_track(
     candidate_entries = _supported_identity_entries(candidates, query_lower)
     if not candidate_entries:
         raise IdentityReviewRequired(query, candidates)
+    requested_variants = {
+        variant for variant in _REQUESTABLE_VARIANTS
+        if _contains_phrase(query_lower, variant)
+    }
+    if not requested_variants & {"live", "en vivo", "en directo", "concert", "auditorio"}:
+        non_live_entries = [
+            item for item in candidate_entries
+            if not _is_live_candidate(item[1])
+        ]
+        if non_live_entries:
+            candidate_entries = non_live_entries
     return resolve_candidates(candidate_entries, query, requested_by)
 
 
@@ -802,7 +817,8 @@ def _should_retry_official_audio(query_lower: str, best_score: int, best: dict) 
         if _contains_phrase(query_lower, variant)
     }
     if requested_variants & {
-        "live", "remix", "acoustic", "cover", "instrumental", "karaoke",
+        "live", "en vivo", "en directo", "concert", "auditorio",
+        "remix", "acoustic", "cover", "instrumental", "karaoke",
         "slowed", "sped up", "nightcore", "mashup", "extended", "demo",
     }:
         return False
@@ -830,13 +846,22 @@ def _has_unrequested_bad_markers(entry: dict, query_lower: str) -> bool:
     if _has_unrequested_alternate_tuning(title, query_lower):
         return True
 
-    if not _variant_requested("live", requested_variants):
+    if not requested_variants & {"live", "en vivo", "en directo", "concert", "auditorio"}:
         if _BOOTLEG_DATE_RE.search(title):
             return True
         if any(location in title for location in _BOOTLEG_LOCATION_WORDS):
             return True
 
     return False
+
+
+def _is_live_candidate(entry: dict) -> bool:
+    candidate_text = _normalize_text(
+        f"{entry.get('title') or ''} {entry.get('uploader') or entry.get('channel') or ''}"
+    )
+    return any(_contains_phrase(candidate_text, marker) for marker in (
+        "live", "en vivo", "en directo", "concert", "auditorio",
+    ))
 
 
 def _has_unrequested_alternate_tuning(title: str, query_lower: str) -> bool:

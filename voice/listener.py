@@ -57,6 +57,15 @@ from voice.audio import (
     to_float32,
 )
 
+from core.config import WAKEWORD_SAMPLE_CAPTURE, WAKEWORD_SAMPLE_DIR
+from voice.wakeword_capture import WakewordSampleRecorder
+
+wakeword_recorder = (
+    WakewordSampleRecorder(WAKEWORD_SAMPLE_DIR)
+    if WAKEWORD_SAMPLE_CAPTURE
+    else None
+)
+
 logger = logging.getLogger(__name__)
 warnings.filterwarnings("ignore", message=".*tflite runtime.*")
 
@@ -353,6 +362,9 @@ class BandiBotSink(voice_recv.AudioSink):
             self.gs.clip_buffer.add_voice_frame(uid, mono_to_stereo(mono48))
             u      = self._get_user(uid)
 
+            if wakeword_recorder is not None:
+                wakeword_recorder.observe(uid, mono48k_to_16k(mono48))
+
             if u.state in ("idle", "processing"):
                 mono16 = mono48k_to_16k(mono48)
                 self._feed_wakeword(uid, mono16, user, u)
@@ -428,6 +440,10 @@ class BandiBotSink(voice_recv.AudioSink):
                     break
 
                 self.gs._last_wake_word = time.time()
+                if wakeword_recorder is not None:
+                    wakeword_recorder.record_detection(
+                        uid, self.gs.guild.id, avg
+                    )
                 self._oww_buf[uid]   = np.array([], dtype=np.int16)
                 self._score_buf[uid].clear()
                 oww.reset()
@@ -436,13 +452,15 @@ class BandiBotSink(voice_recv.AudioSink):
                 if prev_uid is not None and prev_uid != uid:
                     prev_u = self._get_user(prev_uid)
                     if prev_u.state not in ("idle",):
-                        prev_u.interrupted = True
-                        self.gs._interrupted_pipeline_uids.add(prev_uid)
-                        logger.debug("[voice] interrupting current response for a new wake word")
-                        asyncio.run_coroutine_threadsafe(
-                            self.gs._interrupt_current(uid), self.gs.loop
+                        # A different user may issue a command while the prior
+                        # one is still being processed. Keep the prior pipeline
+                        # alive and start a new capture; cancelling it here drops
+                        # valid music requests before play_music is reached.
+                        logger.debug(
+                            "[voice] allowing concurrent command from %s while %s is processing",
+                            user.display_name,
+                            prev_u.display_name,
                         )
-                        prev_u.reset()
 
                 logger.info("[voice] wake word detected")
                 u.state = "waiting"

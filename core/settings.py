@@ -14,6 +14,10 @@ DEFAULTS = {
         "clarification_timeout_seconds": 120.0,
     },
     "logging": {"level": "INFO", "sensitive_content": True},
+    "voice": {
+        "wakeword_sample_capture": False,
+        "wakeword_sample_directory": "data/wakeword_samples",
+    },
 }
 
 
@@ -43,6 +47,9 @@ def load_settings(path: Path) -> dict:
                 if not isinstance(value, str) or value.upper() not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
                     raise ValueError(f"{label}: expected DEBUG, INFO, WARNING, ERROR, or CRITICAL")
                 value = value.upper()
+            elif section == "voice" and key == "wakeword_sample_directory":
+                if not isinstance(value, str) or not value.strip():
+                    raise ValueError(f"{label}: expected a non-empty path")
             elif type(value) is not bool:
                 raise ValueError(f"{label}: expected true or false")
             result[section][key] = value

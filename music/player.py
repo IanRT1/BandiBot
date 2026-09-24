@@ -241,42 +241,51 @@ class GuildPlayer:
         await self._ensure_voice_listener(voice_channel)
 
     async def disconnect(self):
+        logger.debug("[music] disconnect starting in %s", self.guild.name)
         self.closing = True
-        if self._leave_task and self._leave_task is not asyncio.current_task():
-            self._leave_task.cancel()
-        self._leave_task = None
-        self.connection_generation += 1
-        self._playback_generation += 1
-        self._cancel_entry_tasks()
-        await asyncio.gather(*list(self._entry_tasks.values()), return_exceptions=True)
-        await self.operations.close()
-        if self._idle_task:
-            self._idle_task.cancel()
-            self._idle_task = None
-        if self._resolver_task:
-            self._resolver_task.cancel()
-            self._resolver_task = None
-        if self._start_when_free_task:
-            self._start_when_free_task.cancel()
-            self._start_when_free_task = None
-        await self._clear_now_playing_messages()
-        if self.is_connected:
-            await self.voice_client.disconnect()
-        self.voice_client = None
-        self.current = None
-        self.queue.clear()
-        self.now_playing_message = None
-        self.closing = False
+        try:
+            if self._leave_task and self._leave_task is not asyncio.current_task():
+                self._leave_task.cancel()
+            self._leave_task = None
+            self.connection_generation += 1
+            self._playback_generation += 1
+            self._cancel_entry_tasks()
+            await asyncio.gather(*list(self._entry_tasks.values()), return_exceptions=True)
+            await self.operations.close()
+            if self._idle_task:
+                self._idle_task.cancel()
+                self._idle_task = None
+            if self._resolver_task:
+                self._resolver_task.cancel()
+                self._resolver_task = None
+            if self._start_when_free_task:
+                self._start_when_free_task.cancel()
+                self._start_when_free_task = None
+            await self._clear_now_playing_messages()
+            if self.is_connected:
+                await self.voice_client.disconnect()
+        finally:
+            # A Discord/API error during cleanup must not permanently reject
+            # later play requests for this guild. Drop the stale local client
+            # reference so the next connect can reconcile with Discord state.
+            self.voice_client = None
+            self.current = None
+            self.queue.clear()
+            self.now_playing_message = None
+            self.closing = False
 
     def schedule_leave(self):
         """Farewell delivery may finish early; its failure cannot prevent leaving."""
         if self._leave_task and not self._leave_task.done():
+            logger.debug("[music] scheduled leave already pending in %s", self.guild.name)
             return
+        logger.debug("[music] voice leave scheduled in %s", self.guild.name)
         self.closing = True
         self.operations.invalidate()
 
         async def finish_leave():
             await asyncio.sleep(8)
+            logger.debug("[music] scheduled leave executing in %s", self.guild.name)
             await self.disconnect()
             from voice.listener import voice_listener_manager
             await voice_listener_manager.stop_listening(self.guild)
@@ -751,6 +760,12 @@ class VoiceManager:
             return PlayResult("failed", error_code="not_in_voice", message="User is not in a voice channel; cannot play music.")
         player = self.get_player(guild)
         if getattr(player, "closing", False):
+            logger.debug(
+                "[music] rejected play request in %s because player is closing (leave_pending=%s, connected=%s)",
+                guild.name,
+                bool(player._leave_task and not player._leave_task.done()),
+                player.is_connected,
+            )
             return PlayResult("failed", error_code="closing", message="The voice session is closing.")
         operations = self._operations(player)
         channel = requester.voice.channel

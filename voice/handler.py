@@ -306,6 +306,7 @@ async def handle_voice_command(
         has_lore_context=has_retrieved_lore,
         allow_live_search=True,
         allow_song_requests=True,
+        allow_voice_commands=True,
     )
     response_data = await send_to_openai(
         {"messages": messages, "temperature": 0.5},

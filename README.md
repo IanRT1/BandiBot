@@ -371,6 +371,29 @@ These are code constants in `voice/listener.py`, not `.env` or `config.toml` set
 | `HITS_REQUIRED` | `2` | Chunks above threshold needed to trigger |
 | `WAKEWORD_COOLDOWN` | `2` | Seconds between triggers |
 
+### Collecting Real-World Samples
+
+For wake-word model training, enable the opt-in recorder in `config.toml`:
+
+```toml
+[voice]
+wakeword_sample_capture = true
+wakeword_sample_directory = "data/wakeword_samples"
+```
+
+After restarting, BandiBot keeps up to four seconds of recent audio per user in
+memory, but saves only the final 1.5 seconds when a wake word is accepted.
+Leading silence in that window is trimmed while retaining about 0.4 seconds of
+lead-in, then the result is queued as a 16 kHz mono WAV. The existing threshold,
+smoothing, hit-count, and cooldown checks still
+apply, so ignored or duplicate detections are not saved. Files are written on a
+background thread and include the UTC timestamp, guild ID, user ID, and score.
+
+The generated directory is ignored by Git, but recordings remain on the local
+machine until deleted. Inform users and obtain any required consent before
+enabling this feature. Set `wakeword_sample_capture = false` and restart to
+disable it.
+
 ### Notes on Discord Audio
 
 Discord's Opus codec introduces audio degradation compared to a direct microphone signal. Models trained on clean microphone audio will score lower on Discord-processed audio. For troubleshooting or model training, the commented debug-capture block in `voice/listener.py` can write `debug_capture.wav`; do not leave it enabled during normal operation.

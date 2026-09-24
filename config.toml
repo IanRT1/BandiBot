@@ -14,3 +14,8 @@ clarification_timeout_seconds = 120.0
 level = "INFO"
 # Set false to exclude speaker names and message/response text from logs.
 sensitive_content = true
+
+[voice]
+# Opt-in. Saves accepted wake-word audio locally for model training.
+wakeword_sample_capture = true
+wakeword_sample_directory = "data/wakeword_samples"

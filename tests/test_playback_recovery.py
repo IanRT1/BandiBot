@@ -105,6 +105,27 @@ def test_pending_resolution_cannot_restart_invalidated_playback(monkeypatch, act
     asyncio.run(run())
 
 
+def test_disconnect_failure_does_not_leave_player_permanently_closing():
+    async def run():
+        player = music.GuildPlayer(SimpleNamespace(name="Test"))
+
+        async def fail_disconnect():
+            raise RuntimeError("Discord disconnect failed")
+
+        player.voice_client = SimpleNamespace(
+            is_connected=lambda: True,
+            disconnect=fail_disconnect,
+        )
+        with pytest.raises(RuntimeError, match="Discord disconnect failed"):
+            await player.disconnect()
+
+        assert player.closing is False
+        assert player.voice_client is None
+        assert player.current is None
+
+    asyncio.run(run())
+
+
 def test_expired_stream_refreshes_existing_video_without_search(monkeypatch):
     async def run():
         player = music.GuildPlayer(SimpleNamespace(name="Test"))

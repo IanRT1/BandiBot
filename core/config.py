@@ -72,3 +72,8 @@ LOG_LEVEL: str = _settings["logging"]["level"]
 # Message and response previews remain visible for operational transparency.
 # Set logging.sensitive_content to false to exclude conversation contents.
 LOG_SENSITIVE_CONTENT: bool = _settings["logging"]["sensitive_content"]
+
+# ── Wake-word dataset capture ─────────────────────────────────
+# Disabled by default because recordings may contain other people's voices.
+WAKEWORD_SAMPLE_CAPTURE: bool = _settings["voice"]["wakeword_sample_capture"]
+WAKEWORD_SAMPLE_DIR = runtime_root() / _settings["voice"]["wakeword_sample_directory"]
